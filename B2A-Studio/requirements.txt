@@ -1,0 +1,10 @@
+# B2A-Studio — Phase 1+ core dependencies (pinned stable versions)
+streamlit==1.44.1
+requests==2.32.3
+pydub==0.25.1
+imageio-ffmpeg==0.6.0
+openpyxl==3.1.5
+edge-tts>=7.2.7
+python-dotenv==1.1.0
+json-repair==0.44.1
+mutagen==1.47.0

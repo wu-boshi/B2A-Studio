@@ -1,0 +1,75 @@
+# ====================================================================
+# B2A-Studio 开源仓库 .gitignore
+# ====================================================================
+
+# 内部工作区：测试项目、PRD/SOP、本地小说/剧本/成品（不参与开源）
+_local/
+
+# API Key / 环境变量
+.env
+.env.*
+!.env.example
+.flaskenv
+*.env
+!.env.example
+*.key
+.deepseek_api_key
+.step_api_key
+.env.local
+.streamlit/secrets.toml
+
+# 用户上传内容与侵权防范
+*.txt
+!requirements.txt
+!**/requirements.txt
+*.csv
+*.xlsx
+*_有声书/
+有声书输出/
+剧本_*
+
+# 音频与歌词
+*.mp3
+*.wav
+*.flac
+*.m4a
+*.ogg
+*.aac
+*.lrc
+
+# 数据库
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite3
+*.sqlite
+b2a_studio.db
+
+# 过程与缓存
+logs/
+backups/
+.cache/
+*分段缓存*/
+*.jsonl
+*.log
+
+# 内部文档（若未放入 _local/ 时的兜底）
+*PRD*.md
+*SOP*.md
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.poetry/
+venv/
+.venv/
+env/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+*.webloc
