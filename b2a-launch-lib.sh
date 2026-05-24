@@ -55,7 +55,39 @@ b2a_resolve_python() {
   fi
 }
 
-# MP3 内嵌 SYLT / 导出 LRC 依赖 mutagen
+# 每次启动与 requirements.txt 对齐（含 streamlit 等 pinned 版本）
+b2a_ensure_requirements() {
+  local py req_file log_msg
+  py="$(b2a_resolve_python)"
+  req_file="${B2A_REQ_FILE:-requirements.txt}"
+  if [ ! -f "$req_file" ]; then
+    log_msg="[$(date '+%F %T')] 未找到依赖清单: ${req_file}"
+    if [ -n "${B2A_LOG:-}" ]; then
+      echo "$log_msg" >>"${B2A_LOG}"
+    else
+      echo "$log_msg" >&2
+    fi
+    osascript -e 'display alert "未找到 requirements.txt" message "请确认 B2A-Studio 目录完整。"' 2>/dev/null || true
+    return 1
+  fi
+  echo "正在对齐 Python 依赖（requirements.txt），请稍候…"
+  if ! "$py" -m pip install -r "$req_file" >>"${B2A_LOG:-/dev/null}" 2>&1; then
+    osascript -e 'display alert "依赖安装失败" message "请在本机终端执行：\ncd B2A-Studio\npython3 -m pip install -r requirements.txt\n\n成功后重新双击打开。"' 2>/dev/null || true
+    echo "[$(date '+%F %T')] requirements.txt 安装失败 (${py})" >>"${B2A_LOG:-/dev/null}"
+    return 1
+  fi
+  if ! "$py" -c "import streamlit" 2>/dev/null; then
+    osascript -e 'display alert "Streamlit 未就绪" message "依赖已执行安装但无法 import streamlit，请检查 Python 环境。"' 2>/dev/null || true
+    return 1
+  fi
+  log_msg="[$(date '+%F %T')] requirements.txt 已对齐 (${py})"
+  if [ -n "${B2A_LOG:-}" ]; then
+    echo "$log_msg" >>"${B2A_LOG}"
+  fi
+  return 0
+}
+
+# MP3 内嵌 SYLT / 导出 LRC 依赖 mutagen（亦在 requirements.txt 中，此处作二次确认）
 b2a_ensure_mutagen() {
   local py log_msg
   py="$(b2a_resolve_python)"

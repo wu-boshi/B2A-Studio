@@ -138,25 +138,51 @@ def _apply_assistant_prefill(raw: str) -> str:
     return JSON_ASSISTANT_PREFILL + text
 
 
+def _thinking_looks_like_json_output(thinking: str) -> bool:
+    """reasoning 尾部是否已出现 B2A/剧本 JSON，而非普通分析里的花括号。"""
+    tail = thinking[-8000:]
+    if "###B2A###" in tail or "content<<<" in tail:
+        return True
+    if "parsed_lines" in tail or '"parsed_lines"' in tail:
+        return True
+    if '"characters_delta"' in tail or "'characters_delta'" in tail:
+        return True
+    if re.search(r'\{[\s\n]*"(?:parsed_lines|characters_delta)"', tail):
+        return True
+    return False
+
+
 def _thinking_should_abort(
     thinking: str,
     text_len: int,
     *,
     limit: int | None = None,
+    elapsed_sec: float = 0.0,
 ) -> bool:
-    cap = THINKING_ABORT_CHARS if limit is None else limit
-    if cap <= 0:
-        return False
     if text_len > 0:
         return False
-    if len(thinking) < cap:
+    if _thinking_looks_like_json_output(thinking):
         return False
-    tail = thinking[-4000:]
-    if "parsed_lines" in tail or '"parsed_lines"' in tail:
-        return False
-    if "{" in tail:
-        return False
-    return True
+
+    cap = THINKING_ABORT_CHARS if limit is None else limit
+    if cap > 0 and len(thinking) >= cap:
+        return True
+
+    # 章节流式：长时间只有 reasoning、未见 content 时提前中止并重试直出 JSON
+    min_chars = CHAPTER_THINKING_ABORT_MIN_CHARS
+    time_cap = CHAPTER_THINKING_ABORT_TIME_SEC
+    if (
+        limit is not None
+        and min_chars > 0
+        and time_cap > 0
+        and len(thinking) >= min_chars
+        and elapsed_sec >= time_cap
+    ):
+        return True
+
+    return False
+
+
 LLM_CONNECT_TIMEOUT_SEC = 15
 LLM_READ_TIMEOUT_SEC = 600
 # 单章流式请求：连续无新数据超过该秒数则判定超时（非全书总时长）
@@ -172,8 +198,16 @@ def resolve_chapter_max_tokens() -> int | None:
 
 
 CHAPTER_MAX_TOKENS = resolve_chapter_max_tokens()
-# 默认 0：允许 router 长思考后再出 content；仅当显式设置时才提前中止
-CHAPTER_THINKING_ABORT_CHARS = int(os.environ.get("B2A_CHAPTER_THINKING_ABORT", "0"))
+# 单章 reasoning 超阈值仍无 content 则中止并重试直出 JSON（设 0 关闭）
+CHAPTER_THINKING_ABORT_CHARS = int(
+    os.environ.get("B2A_CHAPTER_THINKING_ABORT", "28000")
+)
+CHAPTER_THINKING_ABORT_MIN_CHARS = int(
+    os.environ.get("B2A_CHAPTER_THINKING_ABORT_MIN", "15000")
+)
+CHAPTER_THINKING_ABORT_TIME_SEC = int(
+    os.environ.get("B2A_CHAPTER_THINKING_ABORT_SEC", "120")
+)
 # 超过此字数的一章才拆成多段 API；默认整章处理（可用 B2A_CHAPTER_SINGLE_SHOT_MAX 调低）
 CHAPTER_SINGLE_SHOT_MAX = int(
     os.environ.get("B2A_CHAPTER_SINGLE_SHOT_MAX", "12000")
@@ -2040,6 +2074,7 @@ def _chat_completion_streaming(
                 reasoning_so_far,
                 sum(len(p) for p in content_parts),
                 limit=thinking_abort_chars,
+                elapsed_sec=now - t0,
             ):
                 response.close()
                 raise ThinkingOverflowError(
@@ -2416,6 +2451,14 @@ def step_chapter_completion(
         f"本章 API（max_tokens={_format_max_tokens_label(tokens)}，"
         f"文档上限约 {ROUTER_MAX_TOKENS_CAP}）…"
     )
+    if CHAPTER_THINKING_ABORT_CHARS > 0:
+        sink.detail(
+            f"本章 thinking 提前中止: {CHAPTER_THINKING_ABORT_CHARS} 字"
+            f"（或 reasoning ≥{CHAPTER_THINKING_ABORT_MIN_CHARS} 字且"
+            f" {CHAPTER_THINKING_ABORT_TIME_SEC}s 仍无 content）"
+        )
+    else:
+        sink.detail("本章 thinking 提前中止: 关闭")
 
     try:
         return step_chat_completion(
@@ -3302,6 +3345,7 @@ def ensure_characters_from_script(
     *,
     api_key: str | None = None,
     log: PipelineLog | None = None,
+    run_condense: bool = True,
 ) -> int:
     """合并模型角色表并同步本段对白角色到演员表。"""
     from db import script_line_roles
@@ -3313,7 +3357,7 @@ def ensure_characters_from_script(
             if role and role != "旁白":
                 roles.add(role)
     apply_characters_delta(conn, characters_delta or [], script_roles=roles)
-    if api_key:
+    if api_key and run_condense:
         condense_overlong_personalities(conn, api_key, log=log)
     return sync_speaking_roles_to_cast(conn, parsed_lines)
 
@@ -3952,14 +3996,19 @@ def process_novel_pipeline(
             blocked_segments = list(blocked_segments) + list(refine_blocked)
         api_sec = time.time() - t_api
         n_chars_delta = len(payload.get("characters_delta") or [])
+        plog.progress(
+            f"第 {chapter.chapter_num} 章模型返回完成（{len(parsed)} 行），"
+            "正在写入数据库…"
+        )
 
         with get_connection() as conn:
             extra_chars = ensure_characters_from_script(
                 conn,
                 parsed,
                 payload.get("characters_delta") or [],
-                api_key=api_key,
+                api_key=None,
                 log=plog,
+                run_condense=False,
             )
             lines_written = apply_chapter_parsed_lines(
                 conn,
@@ -3996,6 +4045,16 @@ def process_novel_pipeline(
                 script_lines_added=lines_written,
             )
             conn.commit()
+
+        if api_key:
+            try:
+                with get_connection() as conn:
+                    condense_overlong_personalities(conn, api_key, log=plog)
+                    conn.commit()
+            except Exception as exc:
+                plog.warn(
+                    f"第 {chapter.chapter_num} 章人设压缩跳过（不影响剧本写入）: {exc}"
+                )
 
         extra_note = f"，补登记演员 {extra_chars} 人" if extra_chars else ""
         plog.progress(

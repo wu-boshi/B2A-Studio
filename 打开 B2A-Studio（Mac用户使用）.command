@@ -19,16 +19,15 @@ fi
 
 cd "$APP"
 mkdir -p logs
+export B2A_REQ_FILE="$APP/requirements.txt"
 
-if command -v streamlit >/dev/null 2>&1; then
-  STREAMLIT=(streamlit)
-elif [ -x "/opt/anaconda3/bin/streamlit" ]; then
-  STREAMLIT=(/opt/anaconda3/bin/streamlit)
-  B2A_PYTHON="/opt/anaconda3/bin/python"
-else
-  STREAMLIT=(python3 -m streamlit)
+B2A_PYTHON="$(b2a_resolve_python)"
+export B2A_PYTHON
+
+if ! b2a_ensure_requirements; then
+  echo "依赖未对齐，无法启动。详见 ${B2A_LOG}"
+  exit 1
 fi
-export B2A_PYTHON="${B2A_PYTHON:-$(b2a_resolve_python)}"
 
 if ! b2a_ensure_mutagen; then
   echo "mutagen 未就绪，歌词功能可能不可用；详见 ${B2A_LOG}"
@@ -86,7 +85,7 @@ fi
 echo "[$(date '+%F %T')] 启动 Streamlit（前台）…" >>"$B2A_LOG"
 b2a_print_run_banner
 
-"${STREAMLIT[@]}" run app.py \
+"${B2A_PYTHON}" -m streamlit run app.py \
   --server.port "$B2A_PORT" \
   --server.headless true \
   --browser.gatherUsageStats false \

@@ -735,6 +735,22 @@ def render_sidebar() -> None:
 # Phase 2: pipeline controls
 # ---------------------------------------------------------------------------
 PIPELINE_UI_INACTIVITY_SEC = CHAPTER_READ_TIMEOUT_SEC
+_pipeline_worker_thread: threading.Thread | None = None
+
+
+def _pipeline_worker_alive() -> bool:
+    global _pipeline_worker_thread
+    return (
+        _pipeline_worker_thread is not None
+        and _pipeline_worker_thread.is_alive()
+    )
+
+
+def _sync_pipeline_busy_state() -> bool:
+    """若 session 标记在跑但线程已结束，自动清掉 stale 状态。"""
+    if st.session_state.get("pipeline_running") and not _pipeline_worker_alive():
+        st.session_state.pipeline_running = False
+    return bool(st.session_state.get("pipeline_running")) and _pipeline_worker_alive()
 
 CHARACTER_TABLE_HEADERS = {
     "name": "角色",
@@ -1999,6 +2015,8 @@ def _render_script_csv_export_import(
 
 def render_pipeline_section() -> None:
     """Script breakdown button, progress, and result summary."""
+    global _pipeline_worker_thread
+
     st.subheader("⚙️ 剧本智能拆解")
 
     with st.expander("📁 离线剧本 CSV", expanded=False):
@@ -2034,11 +2052,18 @@ def render_pipeline_section() -> None:
             key="chapter_integrity_ack",
         )
 
-    pipeline_busy = bool(st.session_state.get("pipeline_running"))
+    pipeline_busy = _sync_pipeline_busy_state()
     if pipeline_busy:
         st.warning(
             "已有拆解任务在后台运行（断点续跑 / 指定章节重跑 / 全书拆解）。"
             "请等待其结束或刷新页面查看进度，**勿重复点击**，否则可能多任务并发写库。"
+        )
+        return
+
+    if _pipeline_worker_alive():
+        st.error(
+            "检测到上一次拆解线程仍在后台（可能页面刷新后状态不同步）。"
+            "请等待其结束或完全退出应用后再启动，避免并发写库。"
         )
         return
 
@@ -2244,7 +2269,8 @@ def render_pipeline_section() -> None:
                 if outcome["error"] is None:
                     done_event.set()
 
-    threading.Thread(target=worker, daemon=True).start()
+    _pipeline_worker_thread = threading.Thread(target=worker, daemon=True)
+    _pipeline_worker_thread.start()
     t0 = time.time()
     last_status_ping = 0.0
     last_activity = time.time()
@@ -2297,8 +2323,15 @@ def render_pipeline_section() -> None:
                     status_box.warning(
                         f"已连续 {idle:.0f} 秒页面无新日志（阈值 "
                         f"{PIPELINE_UI_INACTIVITY_SEC // 60} 分钟）。"
-                        "后台若仍在跑，`logs/pipeline.log` 会继续写入，页面会自动追写；"
-                        "也可刷新浏览器后使用「断点续跑」。"
+                        "后台若仍在跑，`logs/pipeline.log` 会继续写入；"
+                        "若长时间停在「第 1 章」且日志无「正在写入数据库」，"
+                        "请刷新页面后点 **断点续跑**（勿重复「启动全书拆解」）。"
+                    )
+                elif idle >= PIPELINE_FAILURE_RETRY_WAIT_SEC and not done_event.is_set():
+                    status_box.error(
+                        f"后台已 {PIPELINE_FAILURE_RETRY_WAIT_SEC // 60} 分钟无新进展。"
+                        "10 分钟自动重试仅在**抛出异常**时触发；"
+                        "若线程卡死请刷新页面后 **断点续跑**。"
                     )
                 elif elapsed - last_status_ping >= 15:
                     status_box.caption(
@@ -2311,6 +2344,8 @@ def render_pipeline_section() -> None:
     finally:
         preview_live.empty()
         st.session_state.pipeline_running = False
+        if _pipeline_worker_thread and not _pipeline_worker_thread.is_alive():
+            _pipeline_worker_thread = None
 
     if outcome["error"]:
         err_msg = str(outcome["error"])

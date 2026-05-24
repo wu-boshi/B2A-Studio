@@ -51,7 +51,7 @@
 
 1. 安装 [Python 3.9+](https://www.python.org/downloads/)（或使用 Anaconda）。
 2. 双击仓库根目录下的 **`打开 B2A-Studio（Mac用户使用）.command`**。  
-   - 首次运行会自动安装 `mutagen` 等缺失依赖。  
+   - 每次启动会自动执行 `pip install -r requirements.txt` 对齐依赖（含 Streamlit 版本）。  
    - 终端窗口保持打开；关闭窗口即停止服务。  
 3. 浏览器将打开 **http://127.0.0.1:8501/**。  
 4. 在页面中勾选法律免责声明，在侧边栏填入 **Step API Key** 并保存。
@@ -60,7 +60,7 @@
 
 1. 安装 [Python 3.9+](https://www.python.org/downloads/)，安装时勾选 **Add Python to PATH**。  
 2. 双击 **`打开 B2A-Studio（Windows用户使用）.bat`**。  
-   - 若未安装依赖，脚本会提示并自动执行 `pip install -r requirements.txt`。  
+   - 每次启动会自动执行 `pip install -r requirements.txt` 对齐依赖。  
    - Streamlit 在后台最小化窗口中运行。  
 3. 浏览器将打开 **http://127.0.0.1:8501/**。  
 4. 勾选免责声明并配置 API Key。

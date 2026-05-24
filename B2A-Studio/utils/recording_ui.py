@@ -23,6 +23,7 @@ from .audiobook_recorder import AudiobookRecorder
 from db import (
     book_recording_progress_summary,
     chapter_recording_progress,
+    ensure_database,
     fetch_failed_script_lines,
     get_connection,
     get_pipeline_stats,
@@ -53,6 +54,7 @@ def _init_recording_session() -> None:
 def render_audiobook_recording_studio() -> None:
     """批量录制中心：控制面板、双进度条、折叠日志、章节试听舱。"""
     _init_recording_session()
+    ensure_database()
     novel_name = st.session_state.get("uploaded_novel_name", "")
     novel_text = st.session_state.get("uploaded_novel_text", "")
     api_key = (st.session_state.get("step_api_key") or "").strip()
@@ -348,7 +350,7 @@ def render_audiobook_recording_studio() -> None:
         unsafe_allow_html=True,
     )
 
-    with st.expander("⏱ 时长异常行扫描", expanded=False, key="recording_duration_scan"):
+    with st.expander("⏱ 时长异常行扫描", expanded=False):
         st.caption(
             "检测 Step 返回过长音频（如 4 字对白 30 秒）。可标记待续录："
             "**只重跑异常行**，断点续录时会自动跳过其余已成功行，章末再合拢 MP3。"
@@ -386,7 +388,6 @@ def render_audiobook_recording_studio() -> None:
         with st.expander(
             f"⚠️ 单行录制失败记录（{len(failed_rows)} 条，续录将自动重试）",
             expanded=True,
-            key="recording_failed_lines",
         ):
             st.caption(
                 "失败行不会进入章 MP3；补录成功后整章时间轴与成品将自动重新合拢。"
@@ -402,7 +403,6 @@ def render_audiobook_recording_studio() -> None:
     with st.expander(
         "🛠 调试日志（仅排查问题时展开）",
         expanded=False,
-        key="recording_debug_log",
     ):
         log_body = (
             state.snapshot_logs()
@@ -430,7 +430,6 @@ def render_audiobook_recording_studio() -> None:
     with st.expander(
         "✨ 录制完成章节试听",
         expanded=False,
-        key="recording_chapter_preview_expander",
     ):
         st.caption(f"共 **{preview_count}** 章可试听")
         if not preview_map:

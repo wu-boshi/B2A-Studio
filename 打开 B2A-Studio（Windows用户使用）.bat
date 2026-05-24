@@ -31,21 +31,27 @@ if not defined PY (
 
 echo [%date% %time%] 启动检查 ^(%PY%^) >> "%B2A_LOG%"
 
+echo.
+echo 正在对齐 Python 依赖（requirements.txt），请稍候…
+echo.
+%PY% -m pip install -r requirements.txt
+if errorlevel 1 (
+  echo.
+  echo [错误] 依赖安装失败。请手动执行：
+  echo   cd /d "%APP%"
+  echo   %PY% -m pip install -r requirements.txt
+  echo.
+  pause
+  exit /b 1
+)
+
 %PY% -c "import streamlit" 2>nul
 if errorlevel 1 (
   echo.
-  echo 首次运行：正在安装 requirements.txt 依赖，请稍候…
+  echo [错误] 依赖已安装但无法 import streamlit，请检查 Python 环境。
   echo.
-  %PY% -m pip install -r requirements.txt
-  if errorlevel 1 (
-    echo.
-    echo [错误] 依赖安装失败。请手动执行：
-    echo   cd /d "%APP%"
-    echo   %PY% -m pip install -r requirements.txt
-    echo.
-    pause
-    exit /b 1
-  )
+  pause
+  exit /b 1
 )
 
 %PY% -c "import mutagen" 2>nul

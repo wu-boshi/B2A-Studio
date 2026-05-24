@@ -279,7 +279,7 @@ def reset_database() -> None:
             except OSError:
                 pass
     with get_connection() as conn:
-        init_schema(conn)
+        _run_schema_migrations(conn)
 
 
 def _run_schema_migrations(conn: sqlite3.Connection) -> None:
@@ -315,17 +315,15 @@ def backup_database(tag: str = "manual") -> Path | None:
 
 
 def ensure_database() -> None:
-    """Create database file and tables if missing（每进程仅执行一次，避免录制中页面刷新抢锁）。"""
+    """Create database file and tables if missing; apply pending schema migrations."""
     global _DB_INITIALIZED
-    if _DB_INITIALIZED:
-        return
-
     _migrate_legacy_database_if_needed()
-    backup_database(tag="auto")
     last_err: BaseException | None = None
     for attempt in range(12):
         try:
             with get_connection() as conn:
+                if not _DB_INITIALIZED:
+                    backup_database(tag="auto")
                 _run_schema_migrations(conn)
             _DB_INITIALIZED = True
             return
@@ -521,7 +519,7 @@ def refresh_rolling_character_ranks(
     script_roles = {str(r["role"]).strip() for r in count_rows}
     role_line_counts = {str(r["role"]): int(r["dialogue_cnt"]) for r in count_rows}
 
-    from extra_stock import STOCK_EXTRA_NAMES
+    from utils.extra_stock import STOCK_EXTRA_NAMES
 
     rank_exclude = {NARRATOR_NAME, *STOCK_EXTRA_NAMES}
     cast_rows = conn.execute(
@@ -1582,7 +1580,7 @@ def bind_character_voice(
     将音色写入 characters.voice_id，并同步到 script_lines 中匹配该演员的角色简称。
     龙套池档位走 extra_stock.bind_stock_extra_voice，自动套用至 extra 配角。
     """
-    from extra_stock import bind_stock_extra_voice, is_stock_extra_name
+    from utils.extra_stock import bind_stock_extra_voice, is_stock_extra_name
 
     name = (character_name or "").strip()
     vid = (voice_id or "").strip()
