@@ -33,6 +33,9 @@ from .recording_log import LOG_FILE, read_recording_log_tail, snapshot_recording
 from .ui_scroll import ANCHOR_RECORDING, request_scroll_to
 
 _RECORDER_KEY = "audiobook_recorder"
+# 录制中 UI 刷新间隔（秒）。过短会触发 WebSocket 风暴导致浏览器 tab 崩溃。
+_RECORDING_LIVE_TICK_SEC = 4.0
+_RECORDING_LIVE_ACTIVE_KEY = "_recording_live_active"
 
 
 def _get_recorder() -> AudiobookRecorder:
@@ -99,7 +102,7 @@ def render_audiobook_recording_studio() -> None:
         "应急兜底：**Edge-TTS**（微软朗读接口，不收费；Step 审核拦截或 "
         "整句时长异常且等待重试仍失败时启用）。"
     )
-    st.caption(f"成品输出目录：`{out_dir}`")
+    st.caption(f"成品输出目录：`{out_dir}`（位于 `_local/`，已 gitignore，不会提交到 GitHub）")
 
     try:
         ensure_ffmpeg_configured()
@@ -247,24 +250,15 @@ def render_audiobook_recording_studio() -> None:
     partial_scope = bool(state.chapter_filter)
 
     if state.running:
-        book_total = state.book_total or len(chapters)
-        book_ratio = (
-            min(1.0, state.book_current / book_total) if book_total else 0.0
+        st.info(
+            "🔴 **录制进行中** — 下方进度每 "
+            f"{_RECORDING_LIVE_TICK_SEC:.0f} 秒自动更新。"
+            "折叠区与试听列表在录制结束后恢复，**请勿频繁刷新页面**。"
         )
-        line_total = state.line_total or 1
-        line_ratio = (
-            min(1.0, state.line_current / line_total) if line_total else 0.0
-        )
-        scope_word = "所选" if partial_scope else "全书"
-        book_caption = (
-            f"录制中 · {scope_word}第 {state.book_current}/{book_total} 章"
-            f"（第 {state.chapter_current} 章）"
-        )
-        line_caption = (
-            f"录制中 · 第 {state.chapter_current} 章"
-            f" · 行 {state.line_current}/{line_total}"
-        )
-    elif book_done:
+        _install_recording_live_tick()
+        return
+
+    if book_done:
         book_ratio = 1.0
         line_ratio = 1.0
         if partial_scope:
@@ -449,19 +443,76 @@ def render_audiobook_recording_studio() -> None:
                 except Exception as exc:
                     st.warning(f"无法加载音频：{exc}")
 
-    _install_recording_live_tick()
+
+def _render_live_recording_progress(
+    state,
+    *,
+    partial_scope: bool,
+) -> None:
+    """录制中专用：只读内存 RecordingState，不查库。"""
+    book_total = state.book_total or 1
+    book_ratio = min(1.0, state.book_current / book_total) if book_total else 0.0
+    line_total = state.line_total or 1
+    line_ratio = min(1.0, state.line_current / line_total) if line_total else 0.0
+    scope_word = "所选" if partial_scope else "全书"
+    book_caption = (
+        f"录制中 · {scope_word}第 {state.book_current}/{book_total} 章"
+        f"（第 {state.chapter_current} 章）"
+    )
+    line_caption = (
+        f"录制中 · 第 {state.chapter_current} 章"
+        f" · 行 {state.line_current}/{line_total}"
+    )
+    status = state.status_message or "运行中…"
+    if state.paused:
+        status = "⏸️ 已暂停 · " + status
+    else:
+        status = "🔴 录制中 · " + status
+
+    st.markdown("**全书进度（按章）**")
+    st.progress(book_ratio)
+    st.caption(book_caption)
+    st.markdown("**当前章进度（按行）**")
+    st.progress(line_ratio)
+    st.caption(line_caption)
+    st.markdown(f"**状态**：{status}")
+    if state.last_error:
+        st.error(state.last_error)
+
+    logs = state.snapshot_logs()
+    if logs:
+        st.caption(f"最新 · `{logs[-1][:160]}`")
+
+
+def _recording_live_fragment_body() -> None:
+    """Fragment 定时回调：仅刷新进度区，禁止 st.rerun()（会触发全页重跑）。"""
+    recorder = _get_recorder()
+    state = recorder.state
+    if not state.running:
+        if st.session_state.pop(_RECORDING_LIVE_ACTIVE_KEY, False):
+            st.rerun()
+        return
+    st.session_state[_RECORDING_LIVE_ACTIVE_KEY] = True
+    _render_live_recording_progress(
+        state,
+        partial_scope=bool(state.chapter_filter),
+    )
+
+
+if hasattr(st, "fragment"):
+    _recording_live_fragment = st.fragment(
+        run_every=timedelta(seconds=_RECORDING_LIVE_TICK_SEC),
+    )(_recording_live_fragment_body)
+else:
+    _recording_live_fragment = None
 
 
 def _install_recording_live_tick() -> None:
-    """录制中定时刷新；优先 fragment 局部 rerun，避免全书 rerun 重复 expander。"""
-
-    def _tick() -> None:
-        if _get_recorder().state.running:
-            st.rerun()
-
-    if hasattr(st, "fragment"):
-        tick = st.fragment(run_every=timedelta(seconds=1.2))(_tick)
-        tick()
-    elif _get_recorder().state.running:
-        time.sleep(1.2)
+    """录制中定时刷新进度 fragment；不触发整页 rerun。"""
+    if _recording_live_fragment is not None:
+        _recording_live_fragment()
+        return
+    _recording_live_fragment_body()
+    time.sleep(_RECORDING_LIVE_TICK_SEC)
+    if _get_recorder().state.running:
         st.rerun()

@@ -49,11 +49,17 @@ def is_chapter_title_line(line: dict[str, Any]) -> bool:
     ):
         return True
     content = str(line.get("content") or "").strip()
-    if not content or not _CHAPTER_TITLE_LINE_RE.search(content[:32]):
+    if not content or not _CHAPTER_TITLE_LINE_RE.match(content):
         return False
-    if _CHAPTER_TITLE_LINE_RE.match(content) and len(content) <= 64:
+    if len(content) > 64:
+        return False
+    rest = content[_CHAPTER_TITLE_LINE_RE.match(content).end() :].lstrip()
+    if not rest:
         return True
-    return False
+    from utils.chapter_title_lines import classify_chapter_opening_tail
+
+    kind, _ = classify_chapter_opening_tail(rest)
+    return kind == "title"
 
 
 def gap_seconds_after_line(line: dict[str, Any]) -> float:
@@ -324,38 +330,38 @@ def mirror_missing_line_caches(
     import shutil
 
     from utils.audiobook_paths import (
-        APP_DIR,
         _title_dir_variants,
+        audiobook_search_roots,
         resolve_audiobook_output_dir,
     )
 
     primary = resolve_audiobook_output_dir(novel_name)
     copied = 0
-    root = APP_DIR
-    for variant in _title_dir_variants(novel_name):
-        alt = root / f"{variant}_有声书"
-        if not alt.is_dir() or alt.resolve() == primary.resolve():
-            continue
-        for line_id, chapter_num in line_pairs:
-            dest = (
-                primary
-                / ".cache"
-                / f"chapter_{int(chapter_num):04d}"
-                / f"line_{int(line_id)}.mp3"
-            )
-            if dest.is_file() and dest.stat().st_size > 0:
+    for root in audiobook_search_roots():
+        for variant in _title_dir_variants(novel_name):
+            alt = root / f"{variant}_有声书"
+            if not alt.is_dir() or alt.resolve() == primary.resolve():
                 continue
-            src = (
-                alt
-                / ".cache"
-                / f"chapter_{int(chapter_num):04d}"
-                / f"line_{int(line_id)}.mp3"
-            )
-            if not src.is_file() or src.stat().st_size <= 0:
-                continue
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dest)
-            copied += 1
+            for line_id, chapter_num in line_pairs:
+                dest = (
+                    primary
+                    / ".cache"
+                    / f"chapter_{int(chapter_num):04d}"
+                    / f"line_{int(line_id)}.mp3"
+                )
+                if dest.is_file() and dest.stat().st_size > 0:
+                    continue
+                src = (
+                    alt
+                    / ".cache"
+                    / f"chapter_{int(chapter_num):04d}"
+                    / f"line_{int(line_id)}.mp3"
+                )
+                if not src.is_file() or src.stat().st_size <= 0:
+                    continue
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dest)
+                copied += 1
     return copied
 
 

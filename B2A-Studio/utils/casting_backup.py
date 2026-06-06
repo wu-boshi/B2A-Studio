@@ -13,10 +13,11 @@ from db import (
     IMPORTANCE_MAIN,
     IMPORTANCE_STOCK,
     NARRATOR_NAME,
+    ROLLING_RANK_TOP_N,
     get_connection,
     init_schema,
 )
-from .extra_stock import fetch_stock_extra_characters
+from .extra_stock import STOCK_EXTRA_SLOTS, fetch_stock_extra_characters
 from .step_audio import bundled_system_voices
 
 from utils.b2a_paths import APP_DIR, B2A_ROOT
@@ -82,8 +83,8 @@ def export_casting_backup(
         "exported_at": datetime.now(timezone.utc).isoformat(),
         "cast_policy": {
             "narrator": 1,
-            "main_top_n": 14,
-            "stock_slots": 6,
+            "main_top_n": ROLLING_RANK_TOP_N,
+            "stock_slots": len(STOCK_EXTRA_SLOTS),
         },
         "narrator": next(
             (c for c in characters if c.get("name") == NARRATOR_NAME),

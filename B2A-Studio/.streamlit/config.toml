@@ -1,3 +1,6 @@
-# B2A-Studio Streamlit server config
 [server]
 maxUploadSize = 5
+
+[logger]
+# 降低 Streamlit 默认日志量；launch.log 主要仍由启动脚本 tee 收集
+level = "warning"

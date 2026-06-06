@@ -112,6 +112,23 @@ b2a_ensure_mutagen() {
   return 1
 }
 
+# 启动前轮转 launch 日志，避免 tee 累积数百 MB 拖慢磁盘与浏览器
+b2a_rotate_launch_log() {
+  local max_bytes=52428800
+  if [ -z "${B2A_LOG:-}" ] || [ ! -f "${B2A_LOG}" ]; then
+    return 0
+  fi
+  local size
+  size=$(stat -f%z "${B2A_LOG}" 2>/dev/null || stat -c%s "${B2A_LOG}" 2>/dev/null || echo 0)
+  if [ "${size:-0}" -le "${max_bytes}" ]; then
+    return 0
+  fi
+  local rotated="${B2A_LOG}.1"
+  rm -f "${rotated}"
+  mv "${B2A_LOG}" "${rotated}"
+  echo "[$(date '+%F %T')] 已轮转 launch 日志（原 ${size} 字节）→ ${rotated}" >>"${B2A_LOG}"
+}
+
 b2a_print_run_banner() {
   cat <<EOF
 

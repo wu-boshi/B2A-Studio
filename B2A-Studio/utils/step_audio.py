@@ -16,6 +16,19 @@ _BUNDLED_VOICES_JSON = B2A_ROOT / "data" / "step_tts2_system_voices.json"
 # 清单变更时递增，促使 session 重新加载内置音色
 BUNDLED_VOICES_CATALOG_REV = "stepaudio-2.5-official-36"
 
+# 试镜大厅不展示：偏客服/助手风格，与有声书其余音色不匹配
+CASTING_EXCLUDED_VOICE_IDS = frozenset(
+    {
+        "shuangkuainansheng",  # 爽快男声
+        "ganliannvsheng",  # 干练女声
+        "qinhenvsheng",  # 亲和女声
+        "huolinvsheng",  # 活力女声
+    }
+)
+CASTING_EXCLUDED_DISPLAY_NAMES = frozenset(
+    {"爽快男声", "干练女声", "亲和女声", "活力女声"}
+)
+
 STEP_PLAN_API_BASE = "https://api.stepfun.com/step_plan/v1"
 SPEECH_URL = f"{STEP_PLAN_API_BASE}/audio/speech"
 TTS_MODEL = "stepaudio-2.5-tts"
@@ -75,6 +88,35 @@ def bundled_system_voices() -> list[SystemVoice]:
         except (OSError, json.JSONDecodeError):
             pass
     return []
+
+
+def is_casting_excluded_voice(voice: SystemVoice) -> bool:
+    return (
+        voice.voice_id in CASTING_EXCLUDED_VOICE_IDS
+        or voice.display_name in CASTING_EXCLUDED_DISPLAY_NAMES
+    )
+
+
+def voices_for_casting(voices: list[SystemVoice]) -> list[SystemVoice]:
+    """试镜大厅可选音色（排除风格不匹配的条目）。"""
+    return [v for v in voices if not is_casting_excluded_voice(v)]
+
+
+def is_casting_excluded_voice_id(
+    voice_id: str,
+    *,
+    all_voices: list[SystemVoice] | None = None,
+) -> bool:
+    vid = (voice_id or "").strip()
+    if not vid:
+        return False
+    if vid in CASTING_EXCLUDED_VOICE_IDS:
+        return True
+    if all_voices:
+        for v in all_voices:
+            if v.voice_id == vid:
+                return is_casting_excluded_voice(v)
+    return False
 
 
 def get_system_voices() -> list[SystemVoice]:
@@ -176,6 +218,35 @@ def voice_select_options(
     ids = [v.voice_id for v in voices]
     labels: dict[str, str] = {}
     for v in voices:
+        label = f"{v.display_name}（{v.voice_id}）"
+        if v.description:
+            label += f" — {v.description[:40]}"
+        owner = voice_owners.get(v.voice_id, "")
+        if owner and owner != current_character:
+            label += f"  [{owner} 已占用]"
+        labels[v.voice_id] = label
+    return ids, labels
+
+
+def casting_voice_select_options(
+    voices: list[SystemVoice],
+    *,
+    voice_owners: dict[str, str],
+    current_character: str,
+) -> tuple[list[str], dict[str, str]]:
+    """
+    试镜 selectbox：候选列表已排除 CASTING_EXCLUDED_*；
+    标签表仍覆盖全库，便于展示历史绑定音色名称。
+    """
+    candidates = voices_for_casting(voices)
+    ids, labels = voice_select_options(
+        candidates,
+        voice_owners=voice_owners,
+        current_character=current_character,
+    )
+    for v in voices:
+        if v.voice_id in labels:
+            continue
         label = f"{v.display_name}（{v.voice_id}）"
         if v.description:
             label += f" — {v.description[:40]}"

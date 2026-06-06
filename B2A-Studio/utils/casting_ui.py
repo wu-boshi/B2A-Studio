@@ -14,15 +14,23 @@ from db import (
     get_connection,
     get_pipeline_stats,
     list_character_voice_assignments,
+    refresh_rolling_character_ranks,
 )
-from .extra_stock import fetch_stock_extra_characters, normalize_gender
+from .extra_stock import (
+    STOCK_EXTRA_SLOTS,
+    apply_stock_voices_to_extra_cast,
+    fetch_stock_extra_characters,
+    normalize_gender,
+)
 from .step_audio import (
     BUNDLED_VOICES_CATALOG_REV,
     StepAudioError,
     SystemVoice,
     bundled_system_voices,
+    casting_voice_select_options,
+    is_casting_excluded_voice_id,
     synthesize_casting_preview,
-    voice_select_options,
+    voices_for_casting,
 )
 
 
@@ -71,7 +79,10 @@ def _cast_card_html(character: dict) -> str:
     if character.get("is_narrator"):
         line_label = f"旁白 {line_n} 行"
     elif character.get("is_stock_extra"):
-        line_label = f"匹配配角 {line_n} 人"
+        if not character.get("binding_required", True):
+            line_label = f"匹配配角 {line_n} 人 · 本书可跳过"
+        else:
+            line_label = f"匹配配角 {line_n} 人"
     else:
         line_label = f"对白 {line_n} 句"
     tone = _cast_tone_class(character)
@@ -173,9 +184,16 @@ def _render_cast_status_block(
     )
 
     if effective_voice not in voice_ids:
-        st.warning(
-            f"已绑定音色 `{effective_voice}` 不在当前官方清单中，请重新选择并绑定。"
-        )
+        all_voices = st.session_state.get("system_voices") or []
+        if is_casting_excluded_voice_id(effective_voice, all_voices=all_voices):
+            st.warning(
+                f"已绑定音色 `{effective_voice}` 已从试镜候选移除（风格不匹配），"
+                "请重新选择并绑定。"
+            )
+        else:
+            st.warning(
+                f"已绑定音色 `{effective_voice}` 不在当前官方清单中，请重新选择并绑定。"
+            )
 
 
 def _render_cast_audition_history(card_key: str) -> None:
@@ -215,11 +233,15 @@ def _render_cast_card(
         )
         st.markdown(_cast_card_html(character), unsafe_allow_html=True)
 
+        if character.get("is_stock_extra") and not _stock_binding_required(character):
+            st.caption("本书该档位 **无匹配配角**，无需绑定即可继续录制。")
+            return
+
         if not voice_ids:
             st.error("内置音色库不可用。")
             return
 
-        _, label_map = voice_select_options(
+        _, label_map = casting_voice_select_options(
             st.session_state.system_voices,
             voice_owners=voice_owners,
             current_character=name,
@@ -351,6 +373,44 @@ def _effective_bound_voice(character: dict) -> str:
     return vid
 
 
+def _stock_binding_required(character: dict) -> bool:
+    if not character.get("is_stock_extra"):
+        return True
+    return bool(character.get("binding_required", True))
+
+
+def casting_binding_complete(conn) -> bool:
+    """旁白 + 全部主演 + 本书有配角匹配的龙套档均已写入 voice_id。"""
+    cast = fetch_main_cast_characters(conn)
+    stock = fetch_stock_extra_characters(conn)
+    if not cast:
+        return False
+    for item in cast:
+        if not str(item.get("voice_id") or "").strip():
+            return False
+    for item in stock:
+        if not _stock_binding_required(item):
+            continue
+        if not str(item.get("voice_id") or "").strip():
+            return False
+    return True
+
+
+def _count_bound_cast(cast: list[dict]) -> int:
+    n = 0
+    for c in cast:
+        if _effective_bound_voice(c):
+            n += 1
+    return n
+
+
+def _stock_binding_stats(stock_cast: list[dict]) -> tuple[int, int]:
+    """返回 (已绑定档位数, 本书需绑定的档位数)。"""
+    required = [c for c in stock_cast if _stock_binding_required(c)]
+    bound = sum(1 for c in required if _effective_bound_voice(c))
+    return bound, len(required)
+
+
 def _voice_short_label(voice_id: str, voices: list[SystemVoice]) -> str:
     """折叠态小卡片：仅展示音色中文名，不含 voice_id 与占用提示。"""
     vid = (voice_id or "").strip()
@@ -367,6 +427,8 @@ def _line_count_label(character: dict) -> str:
     if character.get("is_narrator"):
         return f"旁白 {line_n} 行"
     if character.get("is_stock_extra"):
+        if not character.get("binding_required", True):
+            return f"匹配配角 {line_n} 人 · 可跳过"
         return f"匹配配角 {line_n} 人"
     return f"对白 {line_n} 句"
 
@@ -384,6 +446,9 @@ def _render_compact_cast_chip(
     voice_id = _effective_bound_voice(character)
     if voice_id:
         voice_text = html.escape(_voice_short_label(voice_id, voices))
+        voice_cls = "chip-voice"
+    elif character.get("is_stock_extra") and not _stock_binding_required(character):
+        voice_text = "可跳过"
         voice_cls = "chip-voice"
     else:
         voice_text = "未绑定"
@@ -437,30 +502,6 @@ def _render_compact_cast_overview(
     st.caption("已折叠详细试镜控件；点击「展开试镜墙」可试听与重新绑定音色。")
 
 
-def casting_binding_complete(conn) -> bool:
-    """旁白 + 全部主演 + 六档龙套均已写入 voice_id。"""
-    cast = fetch_main_cast_characters(conn)
-    stock = fetch_stock_extra_characters(conn)
-    if not cast or len(stock) < 1:
-        return False
-    for item in (*cast, *stock):
-        if not str(item.get("voice_id") or "").strip():
-            return False
-    return True
-
-
-def _count_bound_cast(cast: list[dict]) -> int:
-    n = 0
-    for c in cast:
-        name = str(c.get("name") or "")
-        vid = str(c.get("voice_id") or "").strip()
-        if not vid:
-            vid = str((st.session_state.get(_bound_cache_key(name)) or {}).get("voice_id") or "").strip()
-        if vid:
-            n += 1
-    return n
-
-
 def _persist_stock_bound_cache_to_db(
     conn,
     stock_cast: list[dict],
@@ -484,9 +525,11 @@ def _persist_stock_bound_cache_to_db(
 
 def render_casting_room() -> None:
     """配音演员试镜大厅主面板。"""
+    stock_slots = len(STOCK_EXTRA_SLOTS)
     st.caption(
         f"**旁白**固定置顶；累计对白量 **Top {ROLLING_RANK_TOP_N}** 为主演试镜；"
-        "**6 档龙套试镜** 覆盖其余配角。"
+        f"其余配角按 **{stock_slots} 档龙套** 自动兜底"
+        f"（共 {ROLLING_RANK_TOP_N + stock_slots} 个需绑定音色 + 旁白）。"
     )
 
     api_key = (st.session_state.get("step_api_key") or "").strip()
@@ -499,13 +542,19 @@ def render_casting_room() -> None:
     if voice_err:
         st.error(voice_err)
     elif voices:
+        casting_count = len(voices_for_casting(voices))
         st.caption(
-            f"内置 StepAudio 2.5 官方音色 · **{len(voices)}** 个"
-            "（[平台文档清单](https://platform.stepfun.com/docs/zh/guides/developer/tts)）"
+            f"内置 StepAudio 2.5 官方音色 · 试镜可选 **{casting_count}** 个"
+            f"（已隐藏 {len(voices) - casting_count} 个风格不匹配音色）· "
+            "[平台文档清单](https://platform.stepfun.com/docs/zh/guides/developer/tts)"
         )
 
     with get_connection() as conn:
         stats = get_pipeline_stats(conn)
+        if stats["script_lines"] > 0:
+            refresh_rolling_character_ranks(conn)
+            apply_stock_voices_to_extra_cast(conn)
+            conn.commit()
         cast = fetch_main_cast_characters(conn)
         stock_cast = fetch_stock_extra_characters(conn)
         _persist_stock_bound_cache_to_db(conn, stock_cast)
@@ -561,8 +610,8 @@ def render_casting_room() -> None:
 
     bound_main = _count_bound_cast(cast)
     main_total = len(cast)
-    bound_stock = _count_bound_cast(stock_cast)
-    stock_total = len(stock_cast)
+    bound_stock, stock_required = _stock_binding_stats(stock_cast)
+    stock_skipped = len(stock_cast) - stock_required
 
     if "casting_collapsed" not in st.session_state:
         # 未完成：首次进入默认展开；已全部绑定：下次打开默认折叠
@@ -570,9 +619,11 @@ def render_casting_room() -> None:
 
     summary_col, fold_col = st.columns([5, 1])
     with summary_col:
+        stock_summary = f"龙套试镜 **{bound_stock}/{stock_required}**"
+        if stock_skipped:
+            stock_summary += f"（另有 **{stock_skipped}** 档本书无配角可跳过）"
         st.markdown(
-            f"主演 **{bound_main}/{main_total}** · "
-            f"龙套试镜 **{bound_stock}/{stock_total}**"
+            f"主演 **{bound_main}/{main_total}** · {stock_summary}"
         )
     with fold_col:
         fold_label = (
@@ -584,23 +635,23 @@ def render_casting_room() -> None:
             st.session_state.casting_collapsed = not st.session_state.casting_collapsed
             st.rerun()
 
-    if bound_main == main_total and bound_stock == stock_total:
+    if bound_main == main_total and bound_stock == stock_required:
         st.success(
-            "🎉 主演与龙套试镜音色均已配置；配角将按年龄/性别自动归入对应龙套档。"
+            "🎉 主演与本书需绑定的龙套试镜音色均已配置；配角将按年龄/性别自动归入对应龙套档。"
         )
     else:
         pending: list[str] = []
         if bound_main < main_total:
             pending.append(f"主演 {main_total - bound_main} 名")
-        if bound_stock < stock_total:
-            pending.append(f"龙套试镜 {stock_total - bound_stock} 项")
+        if bound_stock < stock_required:
+            pending.append(f"龙套试镜 {stock_required - bound_stock} 项")
         if pending:
             st.info(f"尚有 **{' · '.join(pending)}** 未绑定音色。")
 
     if not voices:
         return
 
-    voice_ids, label_map = voice_select_options(
+    voice_ids, label_map = casting_voice_select_options(
         voices,
         voice_owners=voice_owners,
         current_character="",

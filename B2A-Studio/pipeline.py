@@ -643,18 +643,19 @@ def collect_chapter_marker_positions(novel_text: str) -> dict[int, int]:
 
 
 def extract_chapter_title_after_marker(novel_text: str, marker_end: int) -> str:
-    """提取「第N章」标记后、同一行内的章节名（副标题）。"""
-    line_end = novel_text.find("\n", marker_end)
-    if line_end < 0:
-        line_end = len(novel_text)
-    tail = novel_text[marker_end:line_end].strip()
-    tail = re.sub(r"^[\s:：\-—·\.．、\[\]【】]+", "", tail)
-    tail = re.sub(r"[\s:：\-—·\.．、]+$", "", tail)
-    if not tail or CHAPTER_PATTERN.match(tail):
+    """提取「第N章」标记后、同一行内且被判定为副标题的章节名。"""
+    from utils.chapter_title_lines import (
+        classify_chapter_opening_tail,
+        extract_tail_after_marker,
+    )
+
+    tail = extract_tail_after_marker(novel_text, marker_end)
+    kind, subtitle = classify_chapter_opening_tail(tail)
+    if kind != "title" or not subtitle:
         return ""
-    if len(tail) > 48:
-        tail = tail[:48].rstrip() + "…"
-    return tail
+    if len(subtitle) > 48:
+        return subtitle[:48].rstrip() + "…"
+    return subtitle
 
 
 def collect_all_chapter_marker_hits(novel_text: str) -> list[dict[str, Any]]:
@@ -669,6 +670,7 @@ def collect_all_chapter_marker_hits(novel_text: str) -> list[dict[str, Any]]:
             {
                 "chapter_num": num,
                 "offset": start,
+                "marker_end": match.end(),
                 "line": novel_text.count("\n", 0, start) + 1,
                 "label": match.group(0).strip(),
                 "chapter_title": extract_chapter_title_after_marker(
@@ -2678,8 +2680,9 @@ def refine_chapter_payload_after_parse(
     return payload, parsed, extra_blocked
 
 
-_CHAIN_MEMORY_USER_NOTE = """
-【链式人设演进】下方为已落库演员档案（importance_level：main=当前累计对白量 Top 14，extra=龙套池）。
+def _chain_memory_user_note() -> str:
+    return f"""
+【链式人设演进】下方为已落库演员档案（importance_level：main=当前累计对白量 Top {ROLLING_RANK_TOP_N}，extra=龙套池）。
 须结合本章原文更新、合并、深化 personality 与代表台词，禁止原样照抄旧档案。
 每人 personality **不得超过 300 字**（含标点）：在旧档案基础上合并本章新信息后，输出**替换后的完整精炼侧写**，禁止在旧文后追加段落导致变长。
 【物理隔离重申】对白 content 仅含双引号内原话；引导语/动作/神态一律旁白。
@@ -2741,7 +2744,7 @@ def build_chapter_user_prompt(
 - 本段在全书中的字符区间：[{chapter.start}, {chapter.end})
 - 本段原文字数：{len(chapter.text)} 字（其中前 {chapter.overlap_prefix} 字为与上一段重叠的上下文）
 
-{_CHAIN_MEMORY_USER_NOTE}
+{_chain_memory_user_note()}
 【前文已知记忆（链式演进基底）】
 {memory_json}
 {incomplete_block}
@@ -2763,7 +2766,7 @@ def build_chapter_user_prompt(
 - 本章在全书中的字符区间：[{chapter.start}, {chapter.end})
 - 本章原文字数：{len(chapter.text)} 字
 {preamble_block}
-{_CHAIN_MEMORY_USER_NOTE}
+{_chain_memory_user_note()}
 【前文已知记忆（链式演进基底）】
 {memory_json}
 {incomplete_block}
@@ -3656,6 +3659,7 @@ def apply_chapter_parsed_lines(
     parsed_lines: list[Any],
     *,
     chapter_num: int,
+    chapter_openings: dict[int, Any] | None = None,
     chapter_subtitles: dict[int, str] | None = None,
 ) -> int:
     """将一章的 parsed_lines 写入库（覆盖该章已有剧本行）。"""
@@ -3671,9 +3675,11 @@ def apply_chapter_parsed_lines(
         for part in split_misclassified_dialogue_rows(row):
             normalized.append(coerce_dialogue_isolation(part))
     normalized = merge_fragmented_narration_lines(normalized)
-    titles = chapter_subtitles or {}
     normalized = split_merged_chapter_opening_rows(
-        normalized, int(chapter_num), titles
+        normalized,
+        int(chapter_num),
+        chapter_openings,
+        titles_map=chapter_subtitles,
     )
 
     conn.execute(
@@ -3778,8 +3784,12 @@ def process_novel_pipeline(
     )
 
     plog = PipelineLog(on_line=on_log)
-    from utils.chapter_title_lines import build_chapter_subtitles_map
+    from utils.chapter_title_lines import (
+        build_chapter_openings_map,
+        build_chapter_subtitles_map,
+    )
 
+    chapter_openings = build_chapter_openings_map(novel_text)
     chapter_subtitles = build_chapter_subtitles_map(novel_text)
     chapters = slice_novel_by_chapters(novel_text)
     if not chapters:
@@ -4014,6 +4024,7 @@ def process_novel_pipeline(
                 conn,
                 parsed,
                 chapter_num=chapter.chapter_num,
+                chapter_openings=chapter_openings,
                 chapter_subtitles=chapter_subtitles,
             )
             if blocked_segments:
@@ -4033,6 +4044,9 @@ def process_novel_pipeline(
                 )
             sync_speaking_roles_to_cast(conn, parsed)
             rank_stats = refresh_rolling_character_ranks(conn)
+            from utils.extra_stock import apply_stock_voices_to_extra_cast
+
+            apply_stock_voices_to_extra_cast(conn)
             conn.commit()
 
             mark_chunk_completed(
@@ -4120,6 +4134,9 @@ def process_novel_pipeline(
                 plog.warn(f"演员人设自动补全失败（可稍后在预览区手动补全）: {exc}")
 
         refresh_rolling_character_ranks(conn)
+        from utils.extra_stock import apply_stock_voices_to_extra_cast
+
+        apply_stock_voices_to_extra_cast(conn)
         try:
             condense_overlong_personalities(conn, api_key, log=plog)
         except Exception as exc:

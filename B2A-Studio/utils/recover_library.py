@@ -176,7 +176,7 @@ def main() -> None:
         "--cache-root",
         type=Path,
         default=None,
-        help="行级 MP3 缓存根目录（默认 B2A-Studio/[小说名]_有声书）",
+        help="行级 MP3 缓存根目录（默认 _local/[小说名]_有声书）",
     )
     args = parser.parse_args()
 
@@ -184,7 +184,9 @@ def main() -> None:
     novel_name = args.novel.strip()
     cache_root = args.cache_root
     if cache_root is None:
-        cache_root = B2A_ROOT / f"{novel_name}_有声书"
+        from utils.audiobook_paths import audiobook_output_dir
+
+        cache_root = audiobook_output_dir(novel_name)
     else:
         cache_root = cache_root.expanduser().resolve()
 

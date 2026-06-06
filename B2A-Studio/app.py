@@ -2092,7 +2092,7 @@ def render_pipeline_section() -> None:
         "⚙️ 启动全书拆解",
         type="secondary" if resume_primary else "primary",
         use_container_width=True,
-        help="清空本地 SQLite 后按章流式拆解，每章写入后自动 Top 14 演员榜重排。",
+        help=f"清空本地 SQLite 后按章流式拆解，每章写入后自动 Top {ROLLING_RANK_TOP_N} 演员榜重排。",
     )
 
     pending_reprocess = st.session_state.pop("trigger_reprocess_chapters", None)

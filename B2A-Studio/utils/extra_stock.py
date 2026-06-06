@@ -252,7 +252,9 @@ def fetch_stock_extra_characters(conn) -> list[dict[str, Any]]:
         )
         item["is_stock_extra"] = True
         item["is_narrator"] = False
-        item["dialogue_lines"] = count_extra_cast_for_stock_slot(conn, name)
+        match_count = count_extra_cast_for_stock_slot(conn, name)
+        item["dialogue_lines"] = match_count
+        item["binding_required"] = match_count > 0
         out.append(item)
     return out
 

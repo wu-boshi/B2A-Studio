@@ -82,6 +82,8 @@ if ! b2a_port_free; then
   exit 1
 fi
 
+b2a_rotate_launch_log
+
 echo "[$(date '+%F %T')] 启动 Streamlit（前台）…" >>"$B2A_LOG"
 b2a_print_run_banner
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from utils.b2a_paths import APP_DIR, B2A_ROOT
+from utils.b2a_paths import APP_DIR, audiobook_output_root
 
 _INVALID_FS_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _MULTI_SPACE = re.compile(r"\s+")
@@ -60,7 +60,30 @@ def _cache_mp3_score(folder: Path) -> int:
     return sum(1 for _ in cache.rglob("line_*.mp3"))
 
 
-_RESOLVED_OUTPUT_DIRS: dict[tuple[str, str], Path] = {}
+_RESOLVED_OUTPUT_DIRS: dict[str, Path] = {}
+
+
+def audiobook_search_roots(*, base_dir: Path | None = None) -> tuple[Path, ...]:
+    """
+    查找已有有声书目录时扫描的根路径。
+    默认：`_local/`（写入）+ `B2A-Studio/`（历史兼容）。
+    """
+    if base_dir is not None:
+        return (base_dir,)
+    primary = audiobook_output_root()
+    roots: list[Path] = [primary]
+    legacy = APP_DIR.resolve()
+    if legacy != primary:
+        roots.append(legacy)
+    seen: set[str] = set()
+    out: list[Path] = []
+    for root in roots:
+        key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(root)
+    return tuple(out)
 
 
 def _line_cache_exists(folder: Path, chapter_num: int, line_id: int) -> bool:
@@ -80,6 +103,38 @@ def cache_alignment_score(
     )
 
 
+def _pick_best_audiobook_folder(
+    novel_display_name: str,
+    roots: tuple[Path, ...],
+    *,
+    line_pairs: list[tuple[int, int]] | None = None,
+) -> Path | None:
+    best: Path | None = None
+    best_aligned = -1
+    best_raw = -1
+    pairs = line_pairs or []
+    for root in roots:
+        for variant in _title_dir_variants(novel_display_name):
+            candidate = root / f"{variant}_有声书"
+            if not candidate.is_dir():
+                continue
+            aligned = cache_alignment_score(candidate, pairs) if pairs else 0
+            raw = _cache_mp3_score(candidate) + _count_chapter_mp3_files(candidate) * 200
+            if aligned > best_aligned or (
+                aligned == best_aligned and raw > best_raw
+            ):
+                best_aligned = aligned
+                best_raw = raw
+                best = candidate
+    return best
+
+
+def _default_create_root(*, base_dir: Path | None = None) -> Path:
+    if base_dir is not None:
+        return base_dir
+    return audiobook_output_root()
+
+
 def refresh_audiobook_output_dir_resolution(
     novel_display_name: str,
     line_pairs: list[tuple[int, int]],
@@ -88,29 +143,21 @@ def refresh_audiobook_output_dir_resolution(
 ) -> Path:
     """
     按「行 id 与磁盘 line_{id}.mp3 是否对齐」选定有声书目录，并缓存供后续路径解析。
+    新建目录时写入 `_local/`（或 B2A_AUDIOBOOK_OUTPUT_DIR）。
     """
-    root = base_dir if base_dir is not None else APP_DIR
-    cache_key = (novel_display_name.strip(), str(root.resolve()))
-    best: Path | None = None
-    best_aligned = -1
-    best_raw = -1
-    for variant in _title_dir_variants(novel_display_name):
-        candidate = root / f"{variant}_有声书"
-        if not candidate.is_dir():
-            continue
-        aligned = cache_alignment_score(candidate, line_pairs) if line_pairs else 0
-        raw = _cache_mp3_score(candidate) + _count_chapter_mp3_files(candidate) * 200
-        if aligned > best_aligned or (
-            aligned == best_aligned and raw > best_raw
-        ):
-            best_aligned = aligned
-            best_raw = raw
-            best = candidate
+    name_key = novel_display_name.strip()
+    roots = audiobook_search_roots(base_dir=base_dir)
+    best = _pick_best_audiobook_folder(
+        novel_display_name, roots, line_pairs=line_pairs
+    )
     if best is None:
+        create_root = _default_create_root(base_dir=base_dir)
+        create_root.mkdir(parents=True, exist_ok=True)
         title = sanitize_novel_title(novel_display_name)
-        best = root / f"{title}_有声书"
+        best = create_root / f"{title}_有声书"
         best.mkdir(parents=True, exist_ok=True)
-    _RESOLVED_OUTPUT_DIRS[cache_key] = best
+    if base_dir is None:
+        _RESOLVED_OUTPUT_DIRS[name_key] = best
     return best
 
 
@@ -122,29 +169,29 @@ def resolve_audiobook_output_dir(
 ) -> Path:
     """
     解析实际有声书目录：优先使用 refresh 缓存；否则按目录体量启发式选择。
+    新建目录时写入 `_local/`（或 B2A_AUDIOBOOK_OUTPUT_DIR）。
     """
-    root = base_dir if base_dir is not None else APP_DIR
-    cache_key = (novel_display_name.strip(), str(root.resolve()))
-    cached = _RESOLVED_OUTPUT_DIRS.get(cache_key)
-    if cached is not None and cached.is_dir():
-        return cached
+    name_key = novel_display_name.strip()
+    if base_dir is None:
+        cached = _RESOLVED_OUTPUT_DIRS.get(name_key)
+        if cached is not None and cached.is_dir():
+            return cached
 
-    best: Path | None = None
-    best_score = -1
-    for variant in _title_dir_variants(novel_display_name):
-        candidate = root / f"{variant}_有声书"
-        if not candidate.is_dir():
-            continue
-        score = _cache_mp3_score(candidate) + _count_chapter_mp3_files(candidate) * 200
-        if score > best_score:
-            best_score = score
-            best = candidate
+    roots = audiobook_search_roots(base_dir=base_dir)
+    best = _pick_best_audiobook_folder(novel_display_name, roots)
     if best is not None:
+        if base_dir is None:
+            _RESOLVED_OUTPUT_DIRS[name_key] = best
         return best
+
+    create_root = _default_create_root(base_dir=base_dir)
     title = sanitize_novel_title(novel_display_name)
-    out = root / f"{title}_有声书"
+    out = create_root / f"{title}_有声书"
     if create_if_missing:
+        create_root.mkdir(parents=True, exist_ok=True)
         out.mkdir(parents=True, exist_ok=True)
+    if base_dir is None:
+        _RESOLVED_OUTPUT_DIRS[name_key] = out
     return out
 
 

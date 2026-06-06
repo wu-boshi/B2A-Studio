@@ -68,6 +68,14 @@ if not errorlevel 1 (
   exit /b 0
 )
 
+if exist "%B2A_LOG%" (
+  for %%A in ("%B2A_LOG%") do if %%~zA GTR 52428800 (
+    if exist "%B2A_LOG%.1" del /f /q "%B2A_LOG%.1"
+    move /y "%B2A_LOG%" "%B2A_LOG%.1" >nul
+    echo [%date% %time%] 已轮转 launch 日志 ^→ %B2A_LOG%.1 >> "%B2A_LOG%"
+  )
+)
+
 echo.
 echo 正在后台启动 B2A-Studio（Streamlit）…
 start "B2A-Studio" /MIN cmd /c "%PY% -m streamlit run app.py --server.port %B2A_PORT% --server.headless true --browser.gatherUsageStats false >> \"%B2A_LOG%\" 2>&1"
