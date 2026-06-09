@@ -282,6 +282,7 @@ def _step_tts_once(
     voice_id: str,
     text: str,
     instruction: str,
+    pronunciation_tone: list[str] | None = None,
 ) -> tuple[bytes, int, str]:
     spoken = (text or "").strip() or "。"
     body: dict = {
@@ -293,6 +294,8 @@ def _step_tts_once(
     inst = (instruction or "").strip()
     if inst:
         body["instruction"] = inst[:MAX_INSTRUCTION_CHARS]
+    if pronunciation_tone:
+        body["pronunciation_map"] = {"tone": pronunciation_tone}
 
     response = requests.post(
         SPEECH_URL,
@@ -515,6 +518,7 @@ def _step_audio_with_duration_guard(
     dbg: RecordingDebugLog | LogFn | None,
     pause_check: Callable[[], bool] | None,
     tag: str = "",
+    pronunciation_tone: list[str] | None = None,
 ) -> SynthResult:
     """
     Step 合成；若时长明显异常则等待 5 分钟后重试 Step（共 2 次），
@@ -532,6 +536,7 @@ def _step_audio_with_duration_guard(
             dbg=dbg,
             pause_check=pause_check,
             tag=tag,
+            pronunciation_tone=pronunciation_tone,
         )
         dur = audio_duration_seconds(audio)
         if not is_abnormal_step_duration(text, dur):
@@ -588,6 +593,7 @@ def _step_piece(
     dbg: RecordingDebugLog | LogFn | None,
     pause_check: Callable[[], bool] | None,
     tag: str = "",
+    pronunciation_tone: list[str] | None = None,
 ) -> bytes:
     label = f"Step{tag}" if tag else "Step"
     while True:
@@ -602,6 +608,7 @@ def _step_piece(
                     voice_id=voice_id,
                     text=piece,
                     instruction=instruction,
+                    pronunciation_tone=pronunciation_tone,
                 )
             except requests.RequestException as exc:
                 is_timeout = isinstance(
@@ -676,6 +683,7 @@ def _synthesize_chunked_line(
     chunks: list[str],
     dbg: RecordingDebugLog | LogFn | None,
     pause_check: Callable[[], bool] | None,
+    pronunciation_tone: list[str] | None = None,
 ) -> SynthResult:
     parts: list[bytes] = []
     used_edge = False
@@ -695,6 +703,7 @@ def _synthesize_chunked_line(
                 dbg=dbg,
                 pause_check=pause_check,
                 tag=tag,
+                pronunciation_tone=pronunciation_tone,
             )
             parts.append(part_result.audio_bytes)
             if part_result.engine == "edge":
@@ -760,6 +769,7 @@ def synthesize_line_audio_with_retry(
     log: LogFn | None = None,
     log_debug: RecordingDebugLog | LogFn | None = None,
     pause_check: Callable[[], bool] | None = None,
+    pronunciation_tone: list[str] | None = None,
 ) -> SynthResult:
     dbg = log_debug or log
     text = (content or "").strip()
@@ -786,6 +796,7 @@ def synthesize_line_audio_with_retry(
             dbg=dbg,
             pause_check=pause_check,
             tag="整句",
+            pronunciation_tone=pronunciation_tone,
         )
         _emit(
             dbg,
@@ -815,6 +826,7 @@ def synthesize_line_audio_with_retry(
         chunks=chunks,
         dbg=dbg,
         pause_check=pause_check,
+        pronunciation_tone=pronunciation_tone,
     )
     _emit(
         dbg,

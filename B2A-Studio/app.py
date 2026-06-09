@@ -89,6 +89,10 @@ from utils.casting_ui import (
     ensure_bundled_voices_in_session,
     render_casting_room,
 )
+from utils.pronunciation_ui import (
+    render_pronunciation_panel,
+    render_pronunciation_recording_hint,
+)
 from utils.recording_ui import render_audiobook_recording_studio
 from utils.script_csv_io import (
     ScriptCsvImportError,
@@ -97,6 +101,7 @@ from utils.script_csv_io import (
 )
 from utils.ui_scroll import (
     ANCHOR_CASTING,
+    ANCHOR_PRONUNCIATION,
     ANCHOR_RECORDING,
     apply_pending_scroll,
     render_scroll_anchor,
@@ -1631,7 +1636,10 @@ def render_script_debug_panel(
             merged = compact_fragmented_script_lines(conn)
             pruned = prune_spurious_characters(conn)
             synced_roles = sync_speaking_roles_to_cast(conn)
-            if merged or pruned or synced_roles:
+            from utils.role_voice import sync_orphan_script_role_voices
+
+            role_voices = sync_orphan_script_role_voices(conn)
+            if merged or pruned or synced_roles or any(role_voices.values()):
                 conn.commit()
     with get_connection() as conn:
         stats = get_pipeline_stats(conn)
@@ -2531,6 +2539,11 @@ def render_main() -> None:
         with get_connection() as conn:
             casting_done = casting_binding_complete(conn)
         if casting_done:
+            with st.expander("🔤 读音校正", expanded=False):
+                render_scroll_anchor(ANCHOR_PRONUNCIATION)
+                render_pronunciation_panel(
+                    novel_fingerprint=st.session_state.get("novel_fingerprint", "")
+                )
             with st.container(border=True):
                 render_scroll_anchor(ANCHOR_RECORDING)
                 st.subheader("🎙️ 有声书录音棚")

@@ -7,4 +7,5 @@ openpyxl==3.1.5
 edge-tts>=7.2.7
 python-dotenv==1.1.0
 json-repair==0.44.1
-mutagen==1.47.0
+jieba==0.42.1
+pypinyin==0.53.0

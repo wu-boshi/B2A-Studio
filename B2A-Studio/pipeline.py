@@ -3335,9 +3335,9 @@ def sync_speaking_roles_to_cast(
             continue
         if not is_plausible_character_name(role, script_roles=roles):
             continue
-        upsert_character(conn, {"name": role})
-        known.add(role)
-        added += 1
+        if upsert_character(conn, {"name": role}):
+            known.add(role)
+            added += 1
     return added
 
 

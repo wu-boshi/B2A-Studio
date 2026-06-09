@@ -561,6 +561,7 @@ def scan_and_queue_duration_anomalies(novel_name: str) -> tuple[list[dict[str, A
 def quick_recording_library_sync(novel_name: str) -> tuple[int, int, int, int]:
     """打开录音棚时的轻量同步：磁盘缓存↔库、修标点失败行、删未完成章 MP3、补全已完成章成品。"""
     from utils.audiobook_paths import refresh_audiobook_output_dir_resolution
+    from utils.role_voice import sync_orphan_script_role_voices
     from db import (
         fetch_script_lines_for_recording,
         get_connection,
@@ -574,6 +575,8 @@ def quick_recording_library_sync(novel_name: str) -> tuple[int, int, int, int]:
                 "SELECT id, chapter_num FROM script_lines"
             ).fetchall()
         ]
+        role_sync = sync_orphan_script_role_voices(conn)
+        conn.commit()
     refresh_audiobook_output_dir_resolution(novel_name, pairs)
     mirror_missing_line_caches(novel_name, pairs)
     sync_recording_status_from_caches(novel_name)

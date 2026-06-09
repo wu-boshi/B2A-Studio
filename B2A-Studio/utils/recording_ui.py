@@ -30,6 +30,7 @@ from db import (
     list_script_chapters,
 )
 from .recording_log import LOG_FILE, read_recording_log_tail, snapshot_recording_log
+from .pronunciation_ui import render_pronunciation_recording_hint
 from .ui_scroll import ANCHOR_RECORDING, request_scroll_to
 
 _RECORDER_KEY = "audiobook_recorder"
@@ -103,6 +104,10 @@ def render_audiobook_recording_studio() -> None:
         "整句时长异常且等待重试仍失败时启用）。"
     )
     st.caption(f"成品输出目录：`{out_dir}`（位于 `_local/`，已 gitignore，不会提交到 GitHub）")
+
+    render_pronunciation_recording_hint(
+        novel_fingerprint=st.session_state.get("novel_fingerprint", "")
+    )
 
     try:
         ensure_ffmpeg_configured()
@@ -220,6 +225,7 @@ def render_audiobook_recording_studio() -> None:
             recorder.start(
                 api_key=api_key,
                 novel_name=novel_name,
+                novel_fingerprint=st.session_state.get("novel_fingerprint", ""),
                 resume=resume_from_checkpoint,
                 chapter_nums=(
                     selected_chapter_nums
@@ -246,8 +252,17 @@ def render_audiobook_recording_studio() -> None:
         st.rerun()
 
     finished_msg = (state.status_message or "").strip()
-    book_done = not state.running and "结束" in finished_msg
     partial_scope = bool(state.chapter_filter)
+
+    lines_fail = int(db_progress.get("lines_failed") or 0)
+    ch_done = int(db_progress.get("chapters_complete") or 0)
+    ch_count = int(db_progress.get("chapter_count") or 0)
+    lines_ok = int(db_progress.get("lines_ok") or 0)
+    lines_total = int(db_progress.get("lines_total") or 0)
+    book_fully_complete = (
+        ch_count > 0 and ch_done >= ch_count and lines_fail == 0
+    )
+    session_ended = (not state.running) and bool(finished_msg)
 
     if state.running:
         st.info(
@@ -258,7 +273,7 @@ def render_audiobook_recording_studio() -> None:
         _install_recording_live_tick()
         return
 
-    if book_done:
+    if book_fully_complete and session_ended:
         book_ratio = 1.0
         line_ratio = 1.0
         if partial_scope:
@@ -267,15 +282,10 @@ def render_audiobook_recording_studio() -> None:
             book_caption = "全书录制已完成"
         line_caption = "各章 MP3 已写入下方成品输出目录"
     else:
-        ch_count = int(db_progress["chapter_count"] or 0)
-        ch_done = int(db_progress["chapters_complete"] or 0)
         active_ch = db_progress["active_chapter"]
         active_ok = int(db_progress["active_ok"] or 0)
         active_fail = int(db_progress["active_failed"] or 0)
         active_total = int(db_progress["active_total"] or 0)
-        lines_ok = int(db_progress["lines_ok"] or 0)
-        lines_fail = int(db_progress["lines_failed"] or 0)
-        lines_total = int(db_progress["lines_total"] or 0)
 
         if ch_count and ch_done < ch_count and active_total > 0:
             book_ratio = min(
@@ -320,11 +330,22 @@ def render_audiobook_recording_studio() -> None:
         status = "⏸️ 已暂停 · " + status
     elif state.running:
         status = "🔴 录制中 · " + status
-    elif book_done:
+    elif lines_fail > 0:
+        status = (
+            f"⚠️ 录制未完成 · **{lines_fail}** 行失败"
+            f"（成功 {lines_ok}/{lines_total}）· 请勾选断点续录"
+        )
+        if finished_msg:
+            status += f" · {finished_msg}"
+    elif book_fully_complete and session_ended:
         status = (
             f"✅ 录制完成 · {finished_msg} "
             f"请到成品输出目录查收：`{out_dir}`"
         )
+    elif book_fully_complete:
+        status = f"✅ 全书已完整 · 共 {ch_count} 章 · `{out_dir}`"
+    elif session_ended and finished_msg:
+        status = f"⚠️ {finished_msg}"
     st.markdown(f"**状态**：{status}")
     if state.last_error:
         st.error(state.last_error)
@@ -491,6 +512,8 @@ def _recording_live_fragment_body() -> None:
     if not state.running:
         if st.session_state.pop(_RECORDING_LIVE_ACTIVE_KEY, False):
             st.rerun()
+        return
+    if (state.status_message or "").strip().endswith(("完成。", "完成", "续录。")):
         return
     st.session_state[_RECORDING_LIVE_ACTIVE_KEY] = True
     _render_live_recording_progress(

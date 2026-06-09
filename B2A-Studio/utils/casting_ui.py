@@ -22,6 +22,7 @@ from .extra_stock import (
     fetch_stock_extra_characters,
     normalize_gender,
 )
+from .pronunciation import load_confirmed_rules_for_api, tone_rules_for_spoken_text
 from .step_audio import (
     BUNDLED_VOICES_CATALOG_REV,
     StepAudioError,
@@ -292,11 +293,20 @@ def _render_cast_card(
             else:
                 with st.spinner("正在渲染试听音频…"):
                     try:
+                        fp = (st.session_state.get("novel_fingerprint") or "").strip()
+                        pronunciation_tone = None
+                        if fp:
+                            with get_connection() as conn:
+                                rules = load_confirmed_rules_for_api(conn, fp)
+                            pronunciation_tone = (
+                                tone_rules_for_spoken_text(rules, quote_1) or None
+                            )
                         audio_bytes = synthesize_casting_preview(
                             api_key,
                             voice_id=selected_voice,
                             quote_text=quote_1,
                             emotion_instruction=q1_inst,
+                            pronunciation_tone=pronunciation_tone,
                         )
                         _append_cast_audition(
                             card_key,
@@ -554,6 +564,9 @@ def render_casting_room() -> None:
         if stats["script_lines"] > 0:
             refresh_rolling_character_ranks(conn)
             apply_stock_voices_to_extra_cast(conn)
+            from utils.role_voice import sync_orphan_script_role_voices
+
+            sync_orphan_script_role_voices(conn)
             conn.commit()
         cast = fetch_main_cast_characters(conn)
         stock_cast = fetch_stock_extra_characters(conn)

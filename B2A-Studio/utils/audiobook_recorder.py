@@ -34,17 +34,17 @@ from db import (
     RECORDING_STATUS_FAILED,
     chapter_recording_progress,
     clear_chapter_audio_tracking,
-    fetch_character_profile,
     fetch_script_lines_for_recording,
     get_connection,
     list_script_chapters,
     mark_line_recording_failed,
     prepare_failed_line_for_step_retry,
-    resolve_cast_voice_id,
     update_script_line_audio_tracking,
 )
 from .recording_log import RecordingDebugLog
 from .step_audio import StepAudioError
+from .pronunciation import load_confirmed_rules_for_api, tone_rules_for_spoken_text
+from .role_voice import resolve_voice_for_script_role
 
 LogFn = Callable[[str], None]
 
@@ -118,6 +118,8 @@ class AudiobookRecorder:
         self._db_lock = threading.Lock()
         self._consecutive_line_failures = 0
         self._halt_for_consecutive_failures = False
+        self._novel_fingerprint = ""
+        self._pronunciation_rules: list[dict] = []
         self._dbg = RecordingDebugLog(on_line=self.state.append_log)
 
     def start(
@@ -125,6 +127,7 @@ class AudiobookRecorder:
         *,
         api_key: str,
         novel_name: str,
+        novel_fingerprint: str = "",
         resume: bool = True,
         chapter_nums: list[int] | None = None,
     ) -> None:
@@ -145,6 +148,7 @@ class AudiobookRecorder:
             self.state._pause_event.set()
             self._consecutive_line_failures = 0
             self._halt_for_consecutive_failures = False
+            self._novel_fingerprint = (novel_fingerprint or "").strip()
 
         def worker() -> None:
             self._dbg.line("Edge引擎", "配置", EDGE_IMPL)
@@ -152,6 +156,7 @@ class AudiobookRecorder:
                 self._run(
                     api_key,
                     novel_name,
+                    novel_fingerprint=self._novel_fingerprint,
                     resume=resume,
                     chapter_nums=self.state.chapter_filter,
                 )
@@ -263,6 +268,7 @@ class AudiobookRecorder:
         api_key: str,
         novel_name: str,
         *,
+        novel_fingerprint: str = "",
         resume: bool,
         chapter_nums: list[int] | None = None,
     ) -> None:
@@ -290,6 +296,18 @@ class AudiobookRecorder:
         with self._db_lock:
             with get_connection() as conn:
                 all_chapters = list_script_chapters(conn)
+                if novel_fingerprint:
+                    self._pronunciation_rules = load_confirmed_rules_for_api(
+                        conn, novel_fingerprint
+                    )
+                else:
+                    self._pronunciation_rules = []
+        if self._pronunciation_rules:
+            self._dbg.line(
+                "读音规则",
+                "已加载",
+                f"{len(self._pronunciation_rules)}条 confirmed",
+            )
 
         if not all_chapters:
             raise StepAudioError("库内尚无剧本章节，请先完成剧本拆解。")
@@ -335,11 +353,54 @@ class AudiobookRecorder:
 
         with self.state._lock:
             if not self.state.reset_requested:
-                if chapter_nums:
-                    self.state.status_message = "指定章节录制流程结束。"
-                else:
-                    self.state.status_message = "全书录制流程结束。"
+                self._set_recording_finish_status(
+                    novel_name, chapter_nums=chapter_nums
+                )
                 self._dbg.ok("录制", "结束", scope=scope_label)
+
+    def _set_recording_finish_status(
+        self,
+        novel_name: str,
+        *,
+        chapter_nums: list[int] | None,
+    ) -> None:
+        """根据库内实际进度设置结束态，避免「流程结束」与失败行/未完成章矛盾。"""
+        from db import book_recording_progress_summary
+
+        with self._db_lock:
+            with get_connection() as conn:
+                summary = book_recording_progress_summary(conn)
+
+        lines_fail = int(summary.get("lines_failed") or 0)
+        ch_done = int(summary.get("chapters_complete") or 0)
+        ch_count = int(summary.get("chapter_count") or 0)
+        lines_ok = int(summary.get("lines_ok") or 0)
+        lines_total = int(summary.get("lines_total") or 0)
+        scope = (
+            f"指定 {len(chapter_nums)} 章"
+            if chapter_nums
+            else "全书"
+        )
+
+        with self.state._lock:
+            self.state.running = False
+            if lines_fail > 0:
+                self.state.status_message = (
+                    f"{scope}录制已停止：{lines_fail} 行失败，请断点续录。"
+                )
+                self.state.last_error = (
+                    f"尚有 {lines_fail} 行未成功（成功 {lines_ok}/{lines_total}）。"
+                    "失败行不会进入章 MP3；勾选断点续录后重试即可。"
+                )
+            elif ch_count > 0 and ch_done < ch_count:
+                self.state.status_message = (
+                    f"{scope}录制已停止：{ch_done}/{ch_count} 章已完成。"
+                )
+            elif chapter_nums:
+                self.state.status_message = "指定章节录制完成。"
+            else:
+                self.state.status_message = "全书录制完成。"
+                self.state.last_error = ""
 
     def _record_chapter(
         self,
@@ -447,24 +508,18 @@ class AudiobookRecorder:
 
             with self._db_lock:
                 with get_connection() as conn:
-                    profile = fetch_character_profile(conn, role)
-                    voice_id = resolve_cast_voice_id(
+                    voice_id, profile, voice_source = resolve_voice_for_script_role(
                         conn,
                         role,
                         voice_id_from_row=str(line.get("voice_id") or ""),
                     )
-                    if not voice_id:
-                        voice_id = resolve_cast_voice_id(
-                            conn,
-                            role,
-                            voice_id_from_row=profile.get("voice_id", ""),
-                        )
 
             preview = content[:24] + ("…" if len(content) > 24 else "")
             self._dbg.line(
                 f"第{chapter_num}章行{line_idx}",
                 "合成",
-                f"role={role} {preview}",
+                f"role={role} {preview}"
+                + (f" [{voice_source}]" if voice_source not in ("exact_cast", "script_line") else ""),
             )
 
             if not voice_id:
@@ -480,6 +535,10 @@ class AudiobookRecorder:
                 continue
 
             try:
+                pronunciation_tone = tone_rules_for_spoken_text(
+                    self._pronunciation_rules,
+                    content,
+                )
                 result = synthesize_line_audio_with_retry(
                     api_key,
                     content=content,
@@ -489,6 +548,7 @@ class AudiobookRecorder:
                     gender=profile.get("gender", ""),
                     log_debug=self._dbg,
                     pause_check=self.state.wait_if_paused,
+                    pronunciation_tone=pronunciation_tone or None,
                 )
             except RecordingPaused:
                 raise

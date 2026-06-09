@@ -143,6 +143,7 @@ def synthesize_casting_preview(
     quote_text: str,
     emotion_instruction: str = "",
     model: str = TTS_MODEL,
+    pronunciation_tone: list[str] | None = None,
 ) -> bytes:
     """
     Step Plan TTS 试听（MP3）。
@@ -166,6 +167,8 @@ def synthesize_casting_preview(
     }
     if instruction:
         body["instruction"] = instruction[:200]
+    if pronunciation_tone:
+        body["pronunciation_map"] = {"tone": pronunciation_tone}
 
     headers = {
         **_auth_headers(api_key),

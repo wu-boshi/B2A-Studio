@@ -6,6 +6,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 ANCHOR_CASTING = "b2a-casting-studio"
+ANCHOR_PRONUNCIATION = "b2a-pronunciation-studio"
 ANCHOR_RECORDING = "b2a-recording-studio"
 
 

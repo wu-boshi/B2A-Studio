@@ -287,6 +287,7 @@ def _run_schema_migrations(conn: sqlite3.Connection) -> None:
     _migrate_characters_schema(conn)
     _migrate_blocked_segments_schema(conn)
     _migrate_script_lines_audio_tracking(conn)
+    _migrate_pronunciation_rules_schema(conn)
 
 
 def backup_database(tag: str = "manual") -> Path | None:
@@ -395,6 +396,37 @@ def _migrate_blocked_segments_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_pronunciation_rules_schema(conn: sqlite3.Connection) -> None:
+    row = conn.execute(
+        """
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'table' AND name = 'pronunciation_rules'
+        """
+    ).fetchone()
+    if row:
+        return
+    conn.executescript(
+        """
+        CREATE TABLE pronunciation_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            novel_fingerprint TEXT NOT NULL,
+            source_text TEXT NOT NULL,
+            tone_rule TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            hit_count INTEGER NOT NULL DEFAULT 0,
+            context_sample TEXT NOT NULL DEFAULT '',
+            note TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (novel_fingerprint, source_text)
+        );
+        CREATE INDEX idx_pronunciation_rules_book
+            ON pronunciation_rules (novel_fingerprint, status);
+        """
+    )
+    conn.commit()
+
+
 RECORDING_STATUS_OK = "ok"
 RECORDING_STATUS_FAILED = "failed"
 
@@ -441,12 +473,17 @@ def list_characters(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def upsert_character(conn: sqlite3.Connection, data: dict[str, Any]) -> None:
+_INVALID_CAST_NAME_CHARS = frozenset("*#@\\|<>{}[]")
+_MAX_CAST_NAME_LEN = 48
+
+
+def upsert_character(conn: sqlite3.Connection, data: dict[str, Any]) -> bool:
+    """写入或合并演员行。允许括号/斜杠复合名（≤48 字），仍拦截明显非法字符。"""
     name = (data.get("name") or "").strip()
     if not name or name == "旁白":
-        return
-    if any(ch in name for ch in "*#@/\\|<>{}[]") or len(name) > 8:
-        return
+        return False
+    if len(name) > _MAX_CAST_NAME_LEN or any(ch in name for ch in _INVALID_CAST_NAME_CHARS):
+        return False
 
     existing = conn.execute(
         "SELECT * FROM characters WHERE name = ?", (name,)
@@ -494,6 +531,7 @@ def upsert_character(conn: sqlite3.Connection, data: dict[str, Any]) -> None:
         """,
         tuple(merged[field] for field in CHARACTER_FIELDS) + (IMPORTANCE_PENDING,),
     )
+    return True
 
 
 def refresh_rolling_character_ranks(
@@ -956,6 +994,23 @@ def script_role_belongs_to_cast(
             if specialized:
                 return False
         return True
+    if "/" in script_role:
+        segments = [s.strip() for s in script_role.split("/") if s.strip()]
+        if cast_name in segments:
+            return True
+    if len(cast_name) >= 2 and script_role.startswith(cast_name):
+        rest = script_role[len(cast_name) :]
+        if not rest or rest[0] in "（(/·—-：: ":
+            longer_prefixes = [
+                n
+                for n in (all_cast_names or set())
+                if n != cast_name
+                and len(n) > len(cast_name)
+                and script_role.startswith(n)
+            ]
+            if longer_prefixes:
+                return cast_name == max(longer_prefixes, key=len)
+            return True
     if len(script_role) < 2 or not cast_name.endswith(script_role):
         return False
     if cast_name in script_roles:
@@ -1949,4 +2004,134 @@ def clear_chapter_audio_tracking(conn: sqlite3.Connection, chapter_num: int) -> 
         WHERE chapter_num = ?
         """,
         (int(chapter_num),),
+    )
+
+
+PRONUNCIATION_STATUS_PENDING = "pending"
+PRONUNCIATION_STATUS_CONFIRMED = "confirmed"
+PRONUNCIATION_STATUS_IGNORED = "ignored"
+
+
+def list_pronunciation_rules(
+    conn: sqlite3.Connection,
+    novel_fingerprint: str,
+    *,
+    status: str | None = None,
+) -> list[dict[str, Any]]:
+    fp = (novel_fingerprint or "").strip()
+    if not fp:
+        return []
+    if status:
+        rows = conn.execute(
+            """
+            SELECT * FROM pronunciation_rules
+            WHERE novel_fingerprint = ? AND status = ?
+            ORDER BY hit_count DESC, length(source_text) DESC, source_text
+            """,
+            (fp, status),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT * FROM pronunciation_rules
+            WHERE novel_fingerprint = ?
+            ORDER BY
+                CASE status
+                    WHEN 'pending' THEN 0
+                    WHEN 'confirmed' THEN 1
+                    ELSE 2
+                END,
+                hit_count DESC,
+                length(source_text) DESC,
+                source_text
+            """,
+            (fp,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def upsert_pronunciation_rule(
+    conn: sqlite3.Connection,
+    *,
+    novel_fingerprint: str,
+    source_text: str,
+    tone_rule: str = "",
+    status: str = PRONUNCIATION_STATUS_PENDING,
+    hit_count: int = 0,
+    context_sample: str = "",
+    note: str = "",
+) -> None:
+    fp = (novel_fingerprint or "").strip()
+    src = (source_text or "").strip()
+    if not fp or not src:
+        return
+    rule = (tone_rule or "").strip()
+    conn.execute(
+        """
+        INSERT INTO pronunciation_rules (
+            novel_fingerprint, source_text, tone_rule, status,
+            hit_count, context_sample, note, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(novel_fingerprint, source_text) DO UPDATE SET
+            tone_rule = excluded.tone_rule,
+            status = excluded.status,
+            hit_count = CASE
+                WHEN excluded.hit_count > 0 THEN excluded.hit_count
+                ELSE pronunciation_rules.hit_count
+            END,
+            context_sample = CASE
+                WHEN excluded.context_sample != '' THEN excluded.context_sample
+                ELSE pronunciation_rules.context_sample
+            END,
+            note = excluded.note,
+            updated_at = datetime('now')
+        """,
+        (
+            fp,
+            src,
+            rule,
+            status,
+            int(hit_count),
+            (context_sample or "").strip(),
+            (note or "").strip(),
+        ),
+    )
+
+
+def delete_pronunciation_rule(conn: sqlite3.Connection, rule_id: int) -> None:
+    conn.execute("DELETE FROM pronunciation_rules WHERE id = ?", (int(rule_id),))
+
+
+def pronunciation_rules_summary(
+    conn: sqlite3.Connection,
+    novel_fingerprint: str,
+) -> dict[str, int]:
+    fp = (novel_fingerprint or "").strip()
+    if not fp:
+        return {"pending": 0, "confirmed": 0, "ignored": 0}
+    rows = conn.execute(
+        """
+        SELECT status, COUNT(*) AS n
+        FROM pronunciation_rules
+        WHERE novel_fingerprint = ?
+        GROUP BY status
+        """,
+        (fp,),
+    ).fetchall()
+    out = {"pending": 0, "confirmed": 0, "ignored": 0}
+    for row in rows:
+        key = str(row["status"] or "")
+        if key in out:
+            out[key] = int(row["n"])
+    return out
+
+
+def list_confirmed_pronunciation_rules(
+    conn: sqlite3.Connection,
+    novel_fingerprint: str,
+) -> list[dict[str, Any]]:
+    return list_pronunciation_rules(
+        conn,
+        novel_fingerprint,
+        status=PRONUNCIATION_STATUS_CONFIRMED,
     )
