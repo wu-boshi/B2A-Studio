@@ -15,10 +15,12 @@ from db import (
     upsert_pronunciation_rule,
 )
 from utils.pronunciation import (
+    _STEP_TONE_OFFICIAL_EXAMPLES,
     default_tone_rule,
     export_rules_json,
     filter_rules_for_display,
     import_rules_json,
+    is_valid_step_tone_rule,
     merge_scan_into_pending,
     prune_substring_rules_on_confirm,
     purge_pending_rules_not_matching,
@@ -40,7 +42,14 @@ def render_pronunciation_panel(*, novel_fingerprint: str) -> None:
 
     st.caption(
         "扫描 **剧本正文**（零 LLM token），列出 **机构/专名** 中含易读错多音字"
-        f"（如「调」）且出现 ≥ 最低次数的词组；确认后注入 StepAudio `pronunciation_map`。"
+        f"（如「调」）且出现 ≥ 最低次数的词组；确认后写入 "
+        "`extra_body.pronunciation_map.tone`（与 Step 官方示例一致）。"
+    )
+    st.caption(
+        "官方格式示例："
+        + " · ".join(f"`{ex}`" for ex in _STEP_TONE_OFFICIAL_EXAMPLES)
+        + "。**勿用**整词全拼如 `郭长城/guo1 chang2 cheng2`（会念出数字）。"
+        "**勿添加演员人名。**"
     )
 
     with get_connection() as conn:
@@ -91,7 +100,8 @@ def render_pronunciation_panel(*, novel_fingerprint: str) -> None:
     with tool4:
         show_ignored = st.checkbox("显示已忽略", key="pron_show_ignored")
 
-    with st.expander("➕ 手动添加 / 导入导出", expanded=False):
+    # 外层 app.py 已用 expander 折叠「读音校正」；此处不可再嵌套 expander
+    if st.checkbox("➕ 手动添加 / 导入导出", key="pron_show_manual", value=False):
         man1, man2, man3 = st.columns([1.2, 1.5, 1])
         with man1:
             manual_src = st.text_input("词组", key="pron_manual_src", placeholder="特调处")
@@ -99,7 +109,7 @@ def render_pronunciation_panel(*, novel_fingerprint: str) -> None:
             manual_tone = st.text_input(
                 "tone 规则",
                 key="pron_manual_tone",
-                placeholder="特调处/te4 diao4 chu4",
+                placeholder="特调处/特diao4处",
             )
         with man3:
             st.write("")
@@ -107,20 +117,29 @@ def render_pronunciation_panel(*, novel_fingerprint: str) -> None:
                 src = (manual_src or "").strip()
                 if not src:
                     st.error("请填写词组。")
+                elif not (manual_tone or "").strip() and not default_tone_rule(src):
+                    st.error("无法自动生成规则；请手动填写官方格式，如 特调处/特diao4处")
                 else:
                     tone = (manual_tone or "").strip() or default_tone_rule(src)
-                    with get_connection() as conn:
-                        upsert_pronunciation_rule(
-                            conn,
-                            novel_fingerprint=fp,
-                            source_text=src,
-                            tone_rule=tone,
-                            status=PRONUNCIATION_STATUS_CONFIRMED,
+                    if not is_valid_step_tone_rule(tone):
+                        st.error(
+                            "tone 规则格式不符 Step 官方要求。"
+                            "请用「词组/混合注音」如 阿胶/e1胶、特调处/特diao4处，"
+                            "勿用空格分隔的整词全拼。"
                         )
-                        prune_substring_rules_on_confirm(conn, fp, src)
-                        conn.commit()
-                    st.success(f"已添加：{src}")
-                    st.rerun()
+                    else:
+                        with get_connection() as conn:
+                            upsert_pronunciation_rule(
+                                conn,
+                                novel_fingerprint=fp,
+                                source_text=src,
+                                tone_rule=tone,
+                                status=PRONUNCIATION_STATUS_CONFIRMED,
+                            )
+                            prune_substring_rules_on_confirm(conn, fp, src)
+                            conn.commit()
+                        st.success(f"已添加：{src}")
+                        st.rerun()
 
         with get_connection() as conn:
             rules_export = list_pronunciation_rules(conn, fp)
@@ -213,8 +232,11 @@ def render_pronunciation_panel(*, novel_fingerprint: str) -> None:
             with b1:
                 if st.button("✓ 确认", key=f"pron_ok_{rid}"):
                     tone = (st.session_state.get(tone_key) or "").strip()
-                    if not tone or "/" not in tone:
-                        st.error("tone 规则须含 `/`，如 特调处/te4 diao4 chu4")
+                    if not is_valid_step_tone_rule(tone):
+                        st.error(
+                            "tone 规则须为官方格式，如 特调处/特diao4处、阿胶/e1胶；"
+                            "勿用整词全拼（含空格音节）。"
+                        )
                     else:
                         with get_connection() as conn:
                             upsert_pronunciation_rule(

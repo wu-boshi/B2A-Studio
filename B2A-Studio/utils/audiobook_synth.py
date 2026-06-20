@@ -295,7 +295,11 @@ def _step_tts_once(
     if inst:
         body["instruction"] = inst[:MAX_INSTRUCTION_CHARS]
     if pronunciation_tone:
-        body["pronunciation_map"] = {"tone": pronunciation_tone}
+        from utils.pronunciation import sanitize_tone_rules_for_api
+
+        tone_list = sanitize_tone_rules_for_api(pronunciation_tone)
+        if tone_list:
+            body["pronunciation_map"] = {"tone": tone_list}
 
     response = requests.post(
         SPEECH_URL,

@@ -168,7 +168,11 @@ def synthesize_casting_preview(
     if instruction:
         body["instruction"] = instruction[:200]
     if pronunciation_tone:
-        body["pronunciation_map"] = {"tone": pronunciation_tone}
+        from utils.pronunciation import sanitize_tone_rules_for_api
+
+        tone_list = sanitize_tone_rules_for_api(pronunciation_tone)
+        if tone_list:
+            body["pronunciation_map"] = {"tone": tone_list}
 
     headers = {
         **_auth_headers(api_key),

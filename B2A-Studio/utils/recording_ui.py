@@ -264,6 +264,22 @@ def render_audiobook_recording_studio() -> None:
     )
     session_ended = (not state.running) and bool(finished_msg)
 
+    # 库内已全部完成，但内存仍标记 running（线程已结束、fragment 未触发 rerun）
+    if (
+        state.running
+        and book_fully_complete
+        and lines_total > 0
+        and lines_ok >= lines_total
+    ):
+        with state._lock:
+            state.running = False
+            state.status_message = (
+                "指定章节录制完成。" if partial_scope else "全书录制完成。"
+            )
+            state.last_error = ""
+        finished_msg = state.status_message
+        session_ended = True
+
     if state.running:
         st.info(
             "🔴 **录制进行中** — 下方进度每 "
@@ -513,6 +529,32 @@ def _recording_live_fragment_body() -> None:
         if st.session_state.pop(_RECORDING_LIVE_ACTIVE_KEY, False):
             st.rerun()
         return
+
+    with get_connection() as conn:
+        db_progress = book_recording_progress_summary(conn)
+    lines_fail = int(db_progress.get("lines_failed") or 0)
+    ch_done = int(db_progress.get("chapters_complete") or 0)
+    ch_count = int(db_progress.get("chapter_count") or 0)
+    lines_ok = int(db_progress.get("lines_ok") or 0)
+    lines_total = int(db_progress.get("lines_total") or 0)
+    if (
+        ch_count > 0
+        and ch_done >= ch_count
+        and lines_fail == 0
+        and lines_total > 0
+        and lines_ok >= lines_total
+    ):
+        with state._lock:
+            state.running = False
+            partial = bool(state.chapter_filter)
+            state.status_message = (
+                "指定章节录制完成。" if partial else "全书录制完成。"
+            )
+            state.last_error = ""
+        if st.session_state.pop(_RECORDING_LIVE_ACTIVE_KEY, False):
+            st.rerun()
+        return
+
     if (state.status_message or "").strip().endswith(("完成。", "完成", "续录。")):
         return
     st.session_state[_RECORDING_LIVE_ACTIVE_KEY] = True

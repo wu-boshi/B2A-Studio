@@ -182,16 +182,126 @@ def is_pronunciation_candidate(
     return contains_polyphone(src)
 
 
+def _character_names_in_db(conn) -> set[str]:
+    return {
+        (row.get("name") or "").strip()
+        for row in list_characters(conn)
+        if (row.get("name") or "").strip()
+    }
+
+
+def is_actor_or_proper_name(source_text: str, *, character_names: set[str] | None = None) -> bool:
+    """演员表人名、纯专名不应注入 pronunciation_map（易触发模型念出声调数字）。"""
+    src = (source_text or "").strip()
+    if not src:
+        return False
+    if character_names and src in character_names:
+        return True
+    if len(src) <= 6 and not any(ch in src for ch in _ORG_SUFFIX_CHARS):
+        if not contains_polyphone(src):
+            return True
+        risky = [ch for ch in src if ch in _TTS_RISKY_CHARS and ch not in _ORG_SUFFIX_CHARS]
+        if len(risky) <= 1 and len(src) <= 4:
+            return True
+    return False
+
+
+# StepAudio 官方 pronunciation_map.tone 示例（见 stepaudio-2.5-tts 文档）：
+#   阿胶/e1胶   — 仅对多音字注声调数字，其余保持汉字
+#   扁舟/偏舟   — 同音替代表达期望读音
+#   嫉妒/ji2妒   — 混合：多音字用拼音+调号，邻字保持汉字
+# 禁止整词空格分隔音节：郭长城/guo1 chang2 cheng2（2.5 会念出「长2」）
+_STEP_TONE_OFFICIAL_EXAMPLES = (
+    "阿胶/e1胶",
+    "扁舟/偏舟",
+    "嫉妒/ji2妒",
+    "特调处/特diao4处",
+)
+# 整词全拼（多空格音节）视为非法
+_INVALID_SPACED_PINYIN = re.compile(r"(?:[a-z]+\d\s+){1,}[a-z]+\d", re.I)
+# 调+处/查 → 读 diào
+_DIAO4_AFTER_CHARS = frozenset("处查研")
+
+
+def is_valid_step_tone_rule(rule: str) -> bool:
+    """是否符合 StepAudio pronunciation_map.tone 官方写法。"""
+    text = (rule or "").strip()
+    if "/" not in text:
+        return False
+    src, _, reading = text.partition("/")
+    if not src.strip() or not reading.strip():
+        return False
+    if _INVALID_SPACED_PINYIN.search(reading):
+        return False
+    return True
+
+
+def format_step_tone_rule(source_text: str, reading: str) -> str:
+    """组装单条 tone 规则；reading 侧请遵循官方混合注音格式。"""
+    src = (source_text or "").strip()
+    rhs = (reading or "").strip()
+    if not src or not rhs:
+        return ""
+    rule = f"{src}/{rhs}"
+    return rule if is_valid_step_tone_rule(rule) else ""
+
+
+def _preferred_tone3_for_char(ch: str, src: str, index: int) -> str:
+    """按上下文挑选多音字读音（tone3：diao4、chang2 等）。"""
+    options = pinyin(ch, style=Style.TONE3, heteronym=True, errors="ignore")
+    if not options or not options[0]:
+        return ""
+    readings = options[0]
+    if ch == "调":
+        nxt = src[index + 1] if index + 1 < len(src) else ""
+        if nxt in _DIAO4_AFTER_CHARS:
+            for py in readings:
+                if py.startswith("diao"):
+                    return py
+    if ch == "长" and index + 1 < len(src) and src[index + 1] == "城":
+        for py in readings:
+            if py.startswith("chang"):
+                return py
+    return readings[0]
+
+
 def default_tone_rule(source_text: str, reading: str | None = None) -> str:
-    """生成 StepAudio tone 规则，如 特调/te4 diao4。"""
+    """
+    生成 StepAudio tone 规则（对齐官方 extra_body.pronunciation_map.tone）。
+
+    自动建议格式：仅替换词内多音字为「拼音+调号」，其余字保持汉字，
+    如 特调处 → 特调处/特diao4处，对应文档 阿胶/e1胶、嫉妒/ji2妒。
+    """
     src = (source_text or "").strip()
     if not src:
         return ""
     if reading:
-        return f"{src}/{(reading or '').strip()}"
-    parts = pinyin(src, style=Style.TONE3, heteronym=False, errors="ignore")
-    py = " ".join(item[0] for item in parts if item and item[0])
-    return f"{src}/{py}" if py else ""
+        return format_step_tone_rule(src, reading.strip())
+    out: list[str] = []
+    changed = False
+    for i, ch in enumerate(src):
+        if ch not in _TTS_RISKY_CHARS or ch in _ORG_SUFFIX_CHARS:
+            out.append(ch)
+            continue
+        py = _preferred_tone3_for_char(ch, src, i)
+        if py and py[-1].isdigit():
+            out.append(py)
+            changed = True
+        else:
+            out.append(ch)
+    if not changed:
+        return ""
+    return format_step_tone_rule(src, "".join(out))
+
+
+def sanitize_tone_rules_for_api(rules: list[str]) -> list[str]:
+    """送入 TTS 前最后一道过滤，剔除非法 tone 字符串。"""
+    out: list[str] = []
+    for rule in rules:
+        text = (rule or "").strip()
+        if text and is_valid_step_tone_rule(text):
+            out.append(text)
+    return out
 
 
 def is_known_jieba_word(phrase: str) -> bool:
@@ -482,6 +592,8 @@ def filter_maximal_tone_rules(
 def tone_rules_for_spoken_text(
     confirmed_rules: list[dict[str, Any]],
     spoken: str,
+    *,
+    character_names: set[str] | None = None,
 ) -> list[str]:
     """按当前待读正文筛选并最长去重，供 pronunciation_map.tone 使用。"""
     text = spoken or ""
@@ -493,12 +605,27 @@ def tone_rules_for_spoken_text(
         tone = (row.get("tone_rule") or "").strip()
         if not src or not tone or src not in text:
             continue
+        if is_actor_or_proper_name(src, character_names=character_names):
+            continue
+        if not is_valid_step_tone_rule(tone):
+            continue
         pairs.append((src, tone))
-    return filter_maximal_tone_rules(pairs)
+    return sanitize_tone_rules_for_api(filter_maximal_tone_rules(pairs))
 
 
 def load_confirmed_rules_for_api(conn, novel_fingerprint: str) -> list[dict[str, Any]]:
-    return list_confirmed_pronunciation_rules(conn, (novel_fingerprint or "").strip())
+    fp = (novel_fingerprint or "").strip()
+    if not fp:
+        return []
+    names = _character_names_in_db(conn)
+    return [
+        row
+        for row in list_confirmed_pronunciation_rules(conn, fp)
+        if not is_actor_or_proper_name(
+            str(row.get("source_text") or ""), character_names=names
+        )
+        and is_valid_step_tone_rule(str(row.get("tone_rule") or ""))
+    ]
 
 
 def prune_substring_rules_on_confirm(
